@@ -11,4 +11,6 @@
  */
 #include "../../../vm.h"
 
+#define VIRTUAL_TIMER_IRQ 27
+
 int handle_vgic_maintenance(vm_t *vm, int idx);

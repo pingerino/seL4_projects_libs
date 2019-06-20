@@ -74,6 +74,7 @@
 #define HSR_EC_SMC      23
 
 extern char _cpio_archive[];
+virq_handle_t vtimer_irq_handle;
 
 static int handle_page_fault(vm_t *vm, fault_t *fault)
 {
@@ -391,6 +392,31 @@ static int handle_syscall(vm_t *vm, seL4_Word length)
     return 0;
 }
 
+static void vtimer_irq_ack(void *token) {
+    vm_t *vm = (vm_t *)token;
+    if (!vm) {
+        ZF_LOGE("Failed to ACK VTimer: NULL VM handle");
+        return;
+    }
+    seL4_Error err = seL4_ARM_VCPU_AckVTimer(vm->vcpu.cptr);
+    if (err) {
+        ZF_LOGF("Failed to ACK VTimer: VCPU Ack invocation failed");
+    }
+}
+
+static int virtual_timer_irq(vm_t *vm)
+{
+    if(!vtimer_irq_handle) {
+        vtimer_irq_handle = vm_virq_new(vm, VIRTUAL_TIMER_IRQ, &vtimer_irq_ack, (void *)vm);
+        if (!vtimer_irq_handle) {
+            ZF_LOGE("Failed to create virtual timer irq");
+            return -1;
+        }
+    }
+    vm_inject_IRQ(vtimer_irq_handle);
+    return 0;
+}
+
 int vm_event(vm_t *vm, seL4_MessageInfo_t tag)
 {
     seL4_Word label = seL4_MessageInfo_get_label(tag);
@@ -474,6 +500,14 @@ int vm_event(vm_t *vm, seL4_MessageInfo_t tag)
             }
             return -1;
         }
+    }
+    break;
+    case seL4_Fault_VTimerEvent: {
+        int err = virtual_timer_irq(vm);
+        assert(!err);
+        seL4_MessageInfo_t reply;
+        reply = seL4_MessageInfo_new(0, 0, 0, 0);
+        seL4_Reply(reply);
     }
     break;
     default:
