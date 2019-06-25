@@ -330,7 +330,8 @@ static int handle_syscall(vm_t *vm, seL4_Word length)
     return 0;
 }
 
-static void vtimer_irq_ack(void *token) {
+static void vtimer_irq_ack(void *token)
+{
     vm_t *vm = (vm_t *)token;
     if (!vm) {
         ZF_LOGE("Failed to ACK VTimer: NULL VM handle");
@@ -344,7 +345,7 @@ static void vtimer_irq_ack(void *token) {
 
 static int virtual_timer_irq(vm_t *vm)
 {
-    if(!vtimer_irq_handle) {
+    if (!vtimer_irq_handle) {
         vtimer_irq_handle = vm_virq_new(vm, VIRTUAL_TIMER_IRQ, &vtimer_irq_ack, (void *)vm);
         if (!vtimer_irq_handle) {
             ZF_LOGE("Failed to create virtual timer irq");
