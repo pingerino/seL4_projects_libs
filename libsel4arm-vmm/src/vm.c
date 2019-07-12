@@ -330,6 +330,7 @@ static int handle_syscall(vm_t *vm, seL4_Word length)
     return 0;
 }
 
+#ifdef CONFIG_ENABLE_VTIMER_FAULT
 static void vtimer_irq_ack(void *token)
 {
     vm_t *vm = (vm_t *)token;
@@ -355,6 +356,7 @@ static int virtual_timer_irq(vm_t *vm)
     vm_inject_IRQ(vtimer_irq_handle);
     return 0;
 }
+#endif
 
 int vm_event(vm_t *vm, seL4_MessageInfo_t tag)
 {
@@ -455,6 +457,7 @@ int vm_event(vm_t *vm, seL4_MessageInfo_t tag)
         }
     }
     break;
+#ifdef CONFIG_ENABLE_VTIMER_FAULT
     case seL4_Fault_VTimerEvent: {
         int err = virtual_timer_irq(vm);
         assert(!err);
@@ -463,6 +466,7 @@ int vm_event(vm_t *vm, seL4_MessageInfo_t tag)
         seL4_Reply(reply);
     }
     break;
+#endif
     default:
         /* What? Why are we here? What just happened? */
         printf("Unknown fault from [%s]: label=%p length=%p\n",
