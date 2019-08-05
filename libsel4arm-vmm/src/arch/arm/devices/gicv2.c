@@ -79,7 +79,7 @@ int vgic_set_pending_virq_if_enabled(struct device *vgic_device, vm_t *vm, int v
 
 void vgic_set_pending_virq(vgic_reg_t *reg, int virq, bool status)
 {
-    set_pending(reg, virq, status);
+    gic_dist_set_pending(reg, virq, status);
 }
 /*
  * 1) completely virtual the distributor

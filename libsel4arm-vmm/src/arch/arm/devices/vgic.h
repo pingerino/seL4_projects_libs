@@ -32,9 +32,9 @@
 #define IRQ_IDX(irq) ((irq) / 32)
 #define IRQ_BIT(irq) (1U << ((irq) % 32))
 
-#define not_pending(...) !is_pending(__VA_ARGS__)
-#define not_active(...)  !is_active(__VA_ARGS__)
-#define not_enabled(...) !is_enabled(__VA_ARGS__)
+#define gic_dist_not_pending(...) !gic_dist_is_pending(__VA_ARGS__)
+#define gic_dist_not_active(...)  !gic_dist_is_active(__VA_ARGS__)
+#define git_dist_not_enabled(...) !gic_dist_is_enabled(__VA_ARGS__)
 
 #define MAX_LR_OVERFLOW 64
 #define LR_OF_NEXT(_i) (((_i) == MAX_LR_OVERFLOW - 1) ? 0 : ((_i) + 1))
@@ -118,7 +118,7 @@ static inline struct virq_handle *virq_find_irq_data(vgic_t *vgic, int virq)
     return NULL;
 }
 
-static inline void set_pending(struct gic_dist_map *gic_dist, int irq, int v)
+static inline void gic_dist_set_pending(struct gic_dist_map *gic_dist, int irq, int v)
 {
     if (v) {
         gic_dist->pending_set[IRQ_IDX(irq)] |= IRQ_BIT(irq);
@@ -129,12 +129,12 @@ static inline void set_pending(struct gic_dist_map *gic_dist, int irq, int v)
     }
 }
 
-static inline int is_pending(struct gic_dist_map *gic_dist, int irq)
+static inline int gic_dist_is_pending(struct gic_dist_map *gic_dist, int irq)
 {
     return !!(gic_dist->pending_set[IRQ_IDX(irq)] & IRQ_BIT(irq));
 }
 
-static inline void set_enable(struct gic_dist_map *gic_dist, int irq, int v)
+static inline void gic_dist_set_enable(struct gic_dist_map *gic_dist, int irq, int v)
 {
     if (v) {
         gic_dist->enable_set[IRQ_IDX(irq)] |= IRQ_BIT(irq);
@@ -145,7 +145,7 @@ static inline void set_enable(struct gic_dist_map *gic_dist, int irq, int v)
     }
 }
 
-static inline int is_enabled(struct gic_dist_map *gic_dist, int irq)
+static inline int gic_dist_is_enabled(struct gic_dist_map *gic_dist, int irq)
 {
     return !!(gic_dist->enable_set[IRQ_IDX(irq)] & IRQ_BIT(irq));
 }

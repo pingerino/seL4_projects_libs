@@ -178,11 +178,11 @@ static int vgic_dist_enable_irq(struct device *d, vm_t *vm, int irq)
     gic_dist = vgic_priv_get_dist(d);
     vgic = vgic_device_get_vgic(d);
     DDIST("enabling irq %d\n", irq);
-    set_enable(gic_dist, irq, true);
+    gic_dist_set_enable(gic_dist, irq, true);
     virq_data = virq_find_irq_data(vgic, irq);
     if (virq_data) {
         /* STATE b) */
-        if (not_pending(gic_dist, virq_data->virq)) {
+        if (gic_dist_not_pending(gic_dist, virq_data->virq)) {
             virq_ack(virq_data);
         }
     } else {
@@ -197,7 +197,7 @@ static int vgic_dist_disable_irq(struct device *d, vm_t *vm, int irq)
     struct gic_dist_map *gic_dist = vgic_priv_get_dist(d);
     if (irq >= 16) {
         DDIST("disabling irq %d\n", irq);
-        set_enable(gic_dist, irq, false);
+        gic_dist_set_enable(gic_dist, irq, false);
     }
     return 0;
 }
@@ -218,11 +218,11 @@ int vgic_dist_set_pending_irq(struct device *d, vm_t *vm, int irq)
 
     virq_data = virq_find_irq_data(vgic, irq);
     /* If it is enables, inject the IRQ */
-    if (virq_data && gic_dist->enable && is_enabled(gic_dist, irq)) {
+    if (virq_data && gic_dist->enable && gic_dist_is_enabled(gic_dist, irq)) {
         int err;
         DDIST("Pending set: Inject IRQ from pending set (%d)\n", irq);
 
-        set_pending(gic_dist, virq_data->virq, true);
+        gic_dist_set_pending(gic_dist, virq_data->virq, true);
         err = vgic_vcpu_inject_irq(d, vm, virq_data);
         assert(!err);
 
@@ -246,7 +246,7 @@ static int vgic_dist_clr_pending_irq(struct device *d, vm_t *vm, int irq)
 {
     struct gic_dist_map *gic_dist = vgic_priv_get_dist(d);
     DDIST("clr pending irq %d\n", irq);
-    set_pending(gic_dist, irq, false);
+    gic_dist_set_pending(gic_dist, irq, false);
     return 0;
 }
 
