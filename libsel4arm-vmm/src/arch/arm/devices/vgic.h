@@ -10,6 +10,9 @@
  * @TAG(DATA61_BSD)
  */
 #include "../../../vm.h"
+#include "gicv2.h"
+#include <sel4arm-vmm/vm.h>
+#include <sel4arm-vmm/plat/devices.h>
 
 //#define DEBUG_IRQ
 //#define DEBUG_DIST
@@ -33,6 +36,9 @@
 #define not_active(...)  !is_active(__VA_ARGS__)
 #define not_enabled(...) !is_enabled(__VA_ARGS__)
 
+#define MAX_LR_OVERFLOW 64
+#define LR_OF_NEXT(_i) (((_i) == MAX_LR_OVERFLOW - 1) ? 0 : ((_i) + 1))
+
 enum gic_dist_action {
     ACTION_READONLY,
     ACTION_PASSTHROUGH,
@@ -44,6 +50,105 @@ enum gic_dist_action {
     ACTION_SGI,
     ACTION_UNKNOWN
 };
+
+struct virq_handle {
+    int virq;
+    void (*ack)(void *token);
+    void *token;
+    vm_t *vm;
+};
+
+struct lr_of {
+    struct virq_handle irqs[MAX_LR_OVERFLOW]; /* circular buffer */
+    size_t head;
+    size_t tail;
+    bool full;
+};
+
+typedef struct vgic {
+/// Mirrors the vcpu list registers
+    struct virq_handle *irq[63];
+/// IRQs that would not fit in the vcpu list registers
+    struct lr_of lr_overflow;
+/// Complete set of virtual irqs
+    struct virq_handle *virqs[MAX_VIRQS];
+/// Virtual distributer registers
+    vgic_reg_t *registers;
+} vgic_t;
+
+static inline vgic_t *vgic_device_get_vgic(struct device *d)
+{
+    assert(d);
+    assert(d->priv);
+    return (vgic_t *)d->priv;
+}
+
+static inline struct gic_dist_map *vgic_priv_get_dist(struct device *d)
+{
+    assert(d);
+    assert(d->priv);
+    return priv_get_dist(vgic_device_get_vgic(d)->registers);
+}
+
+static inline struct virq_handle **vgic_priv_get_lr(struct device *d)
+{
+    assert(d);
+    assert(d->priv);
+    return vgic_device_get_vgic(d)->irq;
+}
+
+static inline vm_t *virq_get_vm(struct virq_handle *irq)
+{
+    return irq->vm;
+}
+
+static inline void virq_ack(struct virq_handle *irq)
+{
+    irq->ack(irq->token);
+}
+
+static inline struct virq_handle *virq_find_irq_data(vgic_t *vgic, int virq)
+{
+    int i;
+    for (i = 0; i < MAX_VIRQS; i++) {
+        if (vgic->virqs[i] && vgic->virqs[i]->virq == virq) {
+            return vgic->virqs[i];
+        }
+    }
+    return NULL;
+}
+
+static inline void set_pending(struct gic_dist_map *gic_dist, int irq, int v)
+{
+    if (v) {
+        gic_dist->pending_set[IRQ_IDX(irq)] |= IRQ_BIT(irq);
+        gic_dist->pending_clr[IRQ_IDX(irq)] |= IRQ_BIT(irq);
+    } else {
+        gic_dist->pending_set[IRQ_IDX(irq)] &= ~IRQ_BIT(irq);
+        gic_dist->pending_clr[IRQ_IDX(irq)] &= ~IRQ_BIT(irq);
+    }
+}
+
+static inline int is_pending(struct gic_dist_map *gic_dist, int irq)
+{
+    return !!(gic_dist->pending_set[IRQ_IDX(irq)] & IRQ_BIT(irq));
+}
+
+static inline void set_enable(struct gic_dist_map *gic_dist, int irq, int v)
+{
+    if (v) {
+        gic_dist->enable_set[IRQ_IDX(irq)] |= IRQ_BIT(irq);
+        gic_dist->enable_clr[IRQ_IDX(irq)] |= IRQ_BIT(irq);
+    } else {
+        gic_dist->enable_set[IRQ_IDX(irq)] &= ~IRQ_BIT(irq);
+        gic_dist->enable_clr[IRQ_IDX(irq)] &= ~IRQ_BIT(irq);
+    }
+}
+
+static inline int is_enabled(struct gic_dist_map *gic_dist, int irq)
+{
+    return !!(gic_dist->enable_set[IRQ_IDX(irq)] & IRQ_BIT(irq));
+}
 
 static inline enum gic_dist_action gic_dist_get_action(int offset)
 {
@@ -94,8 +199,15 @@ static inline enum gic_dist_action gic_dist_get_action(int offset)
 
 
 extern const struct device dev_vgic_dist;
-extern const struct device dev_vgic_vcpu;
-extern const struct device dev_vgic_cpu;
-
 
 int handle_vgic_maintenance(vm_t *vm, int idx);
+
+/* functions used by the specific gic implementation */
+int vgic_dist_set_pending_irq(struct device *d, vm_t *vm, int irq);
+int handle_vgic_dist_fault(struct device *d, vm_t *vm, fault_t *fault);
+int vgic_vcpu_inject_irq(struct device *d, vm_t *vm, struct virq_handle *irq);
+
+/* functions provided by the specific gic implementation */
+int vgic_init(vm_t *vm, vgic_t *vgic);
+int vgic_set_pending_virq_if_enabled(struct device *d, vm_t *vm, int virq);
+void vgic_set_pending_virq(vgic_reg_t *vgic, int virq, bool status);
