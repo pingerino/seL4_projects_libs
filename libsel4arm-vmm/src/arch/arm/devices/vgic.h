@@ -145,7 +145,7 @@ static inline void gic_dist_set_enable(struct gic_dist_map *gic_dist, int irq, i
     }
 }
 
-static inline int gic_dist_is_enabled(struct gic_dist_map *gic_dist, int irq)
+static inline int gic_dist_is_irq_enabled(struct gic_dist_map *gic_dist, int irq)
 {
     return !!(gic_dist->enable_set[IRQ_IDX(irq)] & IRQ_BIT(irq));
 }
