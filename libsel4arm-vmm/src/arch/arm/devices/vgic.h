@@ -10,7 +10,7 @@
  * @TAG(DATA61_BSD)
  */
 #include "../../../vm.h"
-#include "gicv2.h"
+#include "gicv3.h"
 #include <sel4arm-vmm/vm.h>
 #include <sel4arm-vmm/plat/devices.h>
 
@@ -31,6 +31,9 @@
 
 #define IRQ_IDX(irq) ((irq) / 32)
 #define IRQ_BIT(irq) (1U << ((irq) % 32))
+
+#define GIC_SGI_IRQ_MIN 16
+#define GIC_SGI_IRQ_MAX 32
 
 #define gic_dist_not_pending(...) !gic_dist_is_pending(__VA_ARGS__)
 #define gic_dist_not_active(...)  !gic_dist_is_active(__VA_ARGS__)

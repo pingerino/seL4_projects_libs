@@ -49,7 +49,8 @@ list(APPEND
            sources
            src/arch/arm/devices/vram.c
            src/arch/arm/devices/vgic.c
-           src/arch/arm/devices/gicv2.c
+           #           src/arch/arm/devices/gicv2.c
+           src/arch/arm/devices/gicv3.c # TODO should be selected by congfi
 )
 
 add_library(sel4arm-vmm STATIC EXCLUDE_FROM_ALL ${sources})

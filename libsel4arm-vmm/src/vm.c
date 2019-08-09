@@ -410,10 +410,13 @@ int vm_event(vm_t *vm, seL4_MessageInfo_t tag)
         /* check if the exception class (bits 26-31) of the HSR indicate WFI/WFE */
         if ((hsr >> 26) == 1) {
             /* generate a new WFI fault */
+            printf("Wait for interrupt\n");
             new_wfi_fault(fault);
             return 0;
         } else {
             printf("Unhandled VCPU fault from [%s]: HSR 0x%08x\n", vm->name, hsr);
+            seL4_UserContext *regs = fault_get_ctx(fault);
+            printf("PC %p\n", regs->pc);
             if ((hsr & 0xfc300000) == 0x60200000 || hsr == 0xf2000800) {
                 seL4_UserContext *regs;
                 new_wfi_fault(fault);

@@ -81,7 +81,7 @@ int vgic_vcpu_inject_irq(struct device *d, vm_t *vm, struct virq_handle *irq)
         }
     }
     int err = seL4_ARM_VCPU_InjectIRQ(vcpu, irq->virq, 0, GIC_GROUP, i);
-    assert((i < 4) || err);
+    assert((i < 4) || err); // TODO this should be number of LRs
     if (!err) {
         /* Shadow */
         vgic->irq[i] = irq;
@@ -110,13 +110,16 @@ int handle_vgic_maintenance(vm_t *vm, int idx)
     assert(d);
     vgic_t *vgic = vgic_device_get_vgic(d);
 
-    /* Clear pending */
-    DIRQ("Maintenance IRQ %d\n", lr[idx]->virq);
-    vgic_set_pending_virq(gic_dist, vgic->irq[idx]->virq, false);
-    virq_ack(vgic->irq[idx]);
+    // TODO cache and read GIC_NUM_LIST_REG
+    for (int i = 0; i < 4; i++) {
+        if (idx & BIT(i)) {
+            vgic_set_pending_virq(vgic_device_get_vgic(d)->registers, vgic->irq[i]->virq, false);
+            virq_ack(vgic->irq[i]);
+            vgic->irq[i] = NULL;
+        }
+    }
 
     /* Check the overflow list for pending IRQs */
-    vgic->irq[idx] = NULL;
     /* copy tail, as vgic_vcpu_inject_irq can mutate it, and we do
      * not want to process any new overflow irqs */
     size_t tail = vgic->lr_overflow.tail;
