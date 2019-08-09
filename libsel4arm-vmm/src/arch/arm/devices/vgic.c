@@ -233,8 +233,6 @@ int handle_vgic_dist_fault(struct device *d, vm_t *vm, fault_t *fault)
     uint32_t *reg = (uint32_t *)((uintptr_t)gic_dist + offset + (offset - (offset % 4)));
     enum gic_dist_action act = gic_dist_get_action(offset);
 
-    assert(offset >= 0 && offset < d->size);
-
     /* Out of range */
     if (offset < 0 || offset >= sizeof(struct gic_dist_map)) {
         DDIST("offset out of range %x %x\n", offset, sizeof(struct gic_dist_map));
@@ -262,7 +260,7 @@ int handle_vgic_dist_fault(struct device *d, vm_t *vm, fault_t *fault)
             } else if (data == 0) {
                 vgic_dist_disable(d, vm);
             } else {
-                assert(!"Unknown enable register encoding\n");
+                ZF_LOGF("Unknown enable register encoding\n");
             }
             return advance_fault(fault);
 
@@ -323,7 +321,7 @@ int handle_vgic_dist_fault(struct device *d, vm_t *vm, fault_t *fault)
             return ignore_fault(fault);
 
         case ACTION_SGI:
-            assert(!"vgic SGI not implemented!\n");
+            ZF_LOGF("vgic SGI not implemented!\n");
             return ignore_fault(fault);
 
         case ACTION_UNKNOWN:
@@ -397,7 +395,6 @@ int vm_install_vgic(vm_t *vm)
 {
     vgic_t *vgic = malloc(sizeof(*vgic));
     if (!vgic) {
-        assert(!"Unable to malloc memory for VGIC");
         return -1;
     }
     int err = virq_init(vgic);
