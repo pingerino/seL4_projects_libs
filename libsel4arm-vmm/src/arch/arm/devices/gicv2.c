@@ -29,8 +29,7 @@ static inline int is_active(struct gic_dist_map *gic_dist, int irq)
 
 static void vgic_dist_reset(struct device *d)
 {
-    struct gic_dist_map *gic_dist;
-    gic_dist = vgic_priv_get_dist(d);
+    struct gic_dist_map *gic_dist = vgic_priv_get_dist(d);
     memset(gic_dist, 0, sizeof(*gic_dist));
     gic_dist->ic_type         = 0x0000fce7; /* RO */
     gic_dist->dist_ident      = 0x0200043b; /* RO */
