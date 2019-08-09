@@ -66,11 +66,7 @@ static int virq_add(vgic_t *vgic, struct virq_handle *virq_data)
 
 static int virq_init(vgic_t *vgic)
 {
-    memset(vgic->irq, 0, sizeof(vgic->irq));
-    memset(vgic->virqs, 0, sizeof(vgic->virqs));
-    vgic->lr_overflow.head = 0;
-    vgic->lr_overflow.tail = 0;
-    vgic->lr_overflow.full = false;
+    memset(vgic, 0, sizeof(vgic_t));
     return 0;
 }
 
