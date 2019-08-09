@@ -90,13 +90,6 @@ static inline struct gic_dist_map *vgic_priv_get_dist(struct device *d)
     return priv_get_dist(vgic_device_get_vgic(d)->registers);
 }
 
-static inline struct virq_handle **vgic_priv_get_lr(struct device *d)
-{
-    assert(d);
-    assert(d->priv);
-    return vgic_device_get_vgic(d)->irq;
-}
-
 static inline vm_t *virq_get_vm(struct virq_handle *irq)
 {
     return irq->vm;

@@ -117,23 +117,18 @@ int handle_vgic_maintenance(vm_t *vm, int idx)
 
     /* STATE d) */
     struct device *d;
-    struct gic_dist_map *gic_dist;
-    struct virq_handle **lr;
 
     d = vm_find_device_by_id(vm, DEV_VGIC_DIST);
     assert(d);
-    gic_dist = vgic_priv_get_dist(d);
-    lr = vgic_priv_get_lr(d);
-    assert(lr[idx]);
+    vgic_t *vgic = vgic_device_get_vgic(d);
 
     /* Clear pending */
     DIRQ("Maintenance IRQ %d\n", lr[idx]->virq);
-    vgic_set_pending_virq(gic_dist, lr[idx]->virq, false);
-    virq_ack(lr[idx]);
+    vgic_set_pending_virq(gic_dist, vgic->irq[idx]->virq, false);
+    virq_ack(vgic->irq[idx]);
 
     /* Check the overflow list for pending IRQs */
-    lr[idx] = NULL;
-    vgic_t *vgic = vgic_device_get_vgic(d);
+    vgic->irq[idx] = NULL;
     /* copy tail, as vgic_vcpu_inject_irq can mutate it, and we do
      * not want to process any new overflow irqs */
     size_t tail = vgic->lr_overflow.tail;
