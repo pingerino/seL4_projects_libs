@@ -25,18 +25,18 @@ struct virq_handle {
      vm_t *vm;
 };
 
-struct lr_of {
+typedef struct lr_of {
      struct virq_handle irqs[MAX_LR_OVERFLOW]; /* circular buffer */
      size_t head;
      size_t tail;
      bool full;
-};
+} lr_of_t;
 
 typedef struct vgic {
 /// Mirrors the vcpu list registers
-     struct virq_handle *irq[63];
+     struct virq_handle *irq[CONFIG_MAX_NUM_NODES][63];
 /// IRQs that would not fit in the vcpu list registers
-     struct lr_of lr_overflow;
+     lr_of_t lr_overflow[CONFIG_MAX_NUM_NODES];
 /// Complete set of virtual irqs
      struct virq_handle *virqs[MAX_VIRQS];
 /// Virtual distributer registers
@@ -83,53 +83,64 @@ static inline int virq_add(vgic_t *vgic, struct virq_handle *virq_data)
     return -1;
 }
 
-static inline int vgic_find_free_irq(vgic_t *vgic) {
+static inline int vgic_find_free_irq(vgic_t *vgic, int vcpu) {
     for (int i = 0; i < 64; i++) {
-        if (vgic->irq[i] == NULL) {
+        if (vgic->irq[vcpu][i] == NULL) {
             return i;
         }
     }
     return -1;
 }
 
-static inline void vgic_shadow_irq(vgic_t *vgic, int i, struct virq_handle *irq)
+static inline void vgic_shadow_irq(vgic_t *vgic, int i, struct virq_handle *irq, int vcpu)
 {
     /* Shadow */
-    vgic->irq[i] = irq;
+    vgic->irq[vcpu][i] = irq;
 }
 
-static inline int vgic_add_overflow(vgic_t *vgic, struct virq_handle *irq)
+static inline int vgic_add_overflow_cpu(lr_of_t *lr_overflow, struct virq_handle *irq)
 {
     /* Add to overflow list */
-    int idx = vgic->lr_overflow.tail;
-    if (unlikely(vgic->lr_overflow.full)) {
+    int idx = lr_overflow->tail;
+    if (unlikely(lr_overflow->full)) {
         ZF_LOGE("too many overflow irqs");
         return -1;
     }
-    vgic->lr_overflow.irqs[idx] = *irq;
-    vgic->lr_overflow.full = (vgic->lr_overflow.head == LR_OF_NEXT(vgic->lr_overflow.tail));
-    if (!vgic->lr_overflow.full) {
-        vgic->lr_overflow.tail = LR_OF_NEXT(idx);
+    lr_overflow->irqs[idx] = *irq;
+    lr_overflow->full = (lr_overflow->head == LR_OF_NEXT(lr_overflow->tail));
+    if (!lr_overflow->full) {
+        lr_overflow->tail = LR_OF_NEXT(idx);
     }
     return 0;
+}
+
+static inline int vgic_add_overflow(vgic_t *vgic, struct virq_handle *irq, int vcpu)
+{
+    return vgic_add_overflow_cpu(&vgic->lr_overflow[vcpu], irq);
 }
 
 int vgic_vcpu_inject_irq(vgic_t *vgic, seL4_CPtr vcpu, struct virq_handle *irq);
 
 /* Check the overflow list for pending IRQs */
-static inline int vgic_handle_overflow(vgic_t *vgic, seL4_CPtr vcpu)
+static inline int vgic_handle_overflow_cpu(vgic_t *vgic, lr_of_t *lr_overflow, seL4_CPtr vcpu)
 {
     /* copy tail, as vgic_vcpu_inject_irq can mutate it, and we do
      * not want to process any new overflow irqs */
-    size_t tail = vgic->lr_overflow.tail;
-    for (size_t i = vgic->lr_overflow.head; i != tail; i = LR_OF_NEXT(i)) {
-        if (vgic_vcpu_inject_irq(vgic, vcpu, &vgic->lr_overflow.irqs[i]) == 0) {
-            vgic->lr_overflow.head = LR_OF_NEXT(i);
-            vgic->lr_overflow.full = (vgic->lr_overflow.head == LR_OF_NEXT(vgic->lr_overflow.tail));
+    size_t tail = lr_overflow->tail;
+    for (size_t i = lr_overflow->head; i != tail; i = LR_OF_NEXT(i)) {
+        if (vgic_vcpu_inject_irq(vgic, vcpu, &lr_overflow->irqs[i]) == 0) {
+            lr_overflow->head = LR_OF_NEXT(i);
+            lr_overflow->full = (lr_overflow->head == LR_OF_NEXT(lr_overflow->tail));
         } else {
             break;
         }
     }
+}
+
+
+static inline int vgic_handle_overflow(vgic_t *vgic, seL4_CPtr vcpu_cptr, int vcpu_id)
+{
+    return vgic_handle_overflow_cpu(vgic, &vgic->lr_overflow[vcpu_id], vcpu_cptr);
 }
 
 virq_handle_t vm_virq_new(vm_t *vm, int virq, void (*ack)(void *), void *token)

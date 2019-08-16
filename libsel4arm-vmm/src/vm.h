@@ -18,6 +18,15 @@ struct vm_onode {
     struct vm_onode *next;
 };
 
+/* We use the top bits of the badge for the VCPU IDX
+ */
+#define VCPU_IDX_BITS 4
+#define VCPU_BADGE_SHIFT  (seL4_BadgeBits - VCPU_IDX_BITS)
+#define VCPU_BADGE_MASK (MASK(VCPU_IDX_BITS) << VCPU_BADGE_SHIFT)
+#define VCPU_BADGE_CREATE(badge, idx)     (badge | (idx << VCPU_BADGE_SHIFT))
+#define VCPU_BADGE_IDX(badge) ((badge & VCPU_BADGE_MASK) >> VCPU_BADGE_SHIFT)
+
+_Static_assert(BIT(VCPU_IDX_BITS) >= CONFIG_MAX_NUM_NODES, "badge_bits_fit_vcpu");
 
 /* When differentiating VM's by colour, call this function */
 const char *choose_colour(vm_t *vm);
@@ -28,14 +37,14 @@ const char *choose_colour(vm_t *vm);
 struct device *vm_find_device_by_id(vm_t *vm, enum devid id);
 struct device *vm_find_device_by_ipa(vm_t *vm, uintptr_t ipa);
 
-static inline seL4_CPtr vm_get_tcb(vm_t *vm)
+static inline seL4_CPtr vm_get_tcb(vm_t *vm, int cpu_idx)
 {
-    return vm->tcb.cptr;
+    return vm->vcpus[cpu_idx].tcb.cptr;
 }
 
-static inline seL4_CPtr vm_get_vcpu(vm_t *vm)
+static inline seL4_CPtr vm_get_vcpu(vm_t *vm, int cpu_idx)
 {
-    return vm->vcpu.cptr;
+    return vm->vcpus[cpu_idx].vcpu.cptr;
 }
 
 vspace_t *vm_get_vspace(vm_t *vm);

@@ -11,4 +11,5 @@
  */
 #include "../../../vm.h"
 
-int handle_vgic_maintenance(vm_t *vm, int idx);
+int handle_vgic_maintenance(vm_t *vm, int idx, seL4_Word vcpu_idx);
+int vm_associate_target_cpu(vm_t *vm, uintptr_t target_cpu, seL4_Word vcpu_id);

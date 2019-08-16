@@ -36,14 +36,14 @@
 #include <sel4arm-vmm/smc.h>
 #include <sel4vmmcore/util/io.h>
 
-#define DEBUG_VM
-#define DEBUG_RAM_FAULTS
+//#define DEBUG_VM
+//#define DEBUG_RAM_FAULTS
 //#define DEBUG_DEV_FAULTS
 //#define DEBUG_STRACE
 
 #define VM_CSPACE_SIZE_BITS    4
 #define VM_FAULT_EP_SLOT       1
-#define VM_CSPACE_SLOT         VM_FAULT_EP_SLOT + CONFIG_MAX_NUM_NODES
+#define VM_CSPACE_SLOT         2
 
 #ifdef DEBUG_RAM_FAULTS
 #define DRAMFAULT(...) printf(__VA_ARGS__)
@@ -68,58 +68,10 @@
 #else
 #define DVM(...) do{}while(0)
 #endif
-#define HSR_EC_MASK     (0xfc000000)
-#define HSR_EC_SHIFT    (26)
-#define HSR_EC(x) (((x) & HSR_EC_MASK) >> HSR_EC_SHIFT)
 
 /* HSR exception codes */
-#define HSR_EC_UNKNOWN              0b000000
-#define HSR_EC_WFI_WFE              0b000001
-#define HSR_EC_MCR_MRC_CP15         0b000011
-#define HSR_EC_MCRR_MRCC_CP15       0b000100
-#define HSR_EC_MCR_MRC_CP14         0b000101
-#define HSR_EC_LDC_STC              0b000110
-#define HSR_EC_MRRC_CP14            0b001100
-#define HSR_EC_ILLEGAL_ES           0b001110
-#define HSR_EC_SVC32                0b010001
-#define HSR_EC_HVC32                0b010010
-#define HSR_EC_SMC32                0b010011
-#define HSR_EC_SVC64                0b010101
-#define HSR_EC_HVC64                0b010110
-#define HSR_EC_SMC64                0b010111
-#define HSR_EC_MSR_MRS_OTHER        0b011000
-#define HSR_EC_INST_ABORT_LEL       0b100000
-#define HSR_EC_INST_ABORT_CEL       0b100001
-#define HSR_EC_PC_ALIGNMENT_FAULT   0b100010
-#define HSR_EC_DATA_ABORT_LEL       0b100100
-#define HSR_EC_DATA_ABORT_CEL       0b100101
-#define HSR_EC_SP_ALIGNMENT_FAULT   0b100110
-#define HSR_EC_SERROR_INT           0b101111
-#define HSR_EC_BRK_LEL              0b110000
-#define HSR_EC_BRK_CEL              0b110001
-#define HSR_EC_SS_LEL               0b110010
-#define HSR_EC_SS_CEL               0b110011
-#define HSR_EC_WATCHPOINT_LEL       0b110100
-#define HSR_EC_WATCHPIONT_CEL       0b110101
-#define HSR_EC_BKPT32               0b111000
-#define HSR_EC_VECTOR_CATCH32       0b111010
-#define HSR_EC_BRK64                0b111100
-
-union hsr {
-uint32_t bits;
-struct hsr_sysreg {
-    unsigned long read:1;   /* Direction */
-    unsigned long crm:4;    /* CRm */
-    unsigned long reg:5;    /* Rt */
-    unsigned long crn:4;    /* CRn */
-    unsigned long op1:3;    /* Op1 */
-    unsigned long op2:3;    /* Op2 */
-    unsigned long op0:2;    /* Op0 */
-    unsigned long res0:3;
-    unsigned long len:1;    /* Instruction length */
-    unsigned long ec:6;
-} s;
-};
+#define HSR_EC_WFI_WFE   1
+#define HSR_EC_SMC      23
 
 extern char _cpio_archive[];
 
@@ -171,10 +123,10 @@ static int handle_page_fault(vm_t *vm, fault_t *fault)
     }
 }
 
-static int handle_exception(vm_t *vm, seL4_Word ip, seL4_Word vcpu_idx)
+static int handle_exception(vm_t *vm, seL4_Word ip)
 {
     seL4_UserContext regs;
-    seL4_CPtr tcb = vm_get_tcb(vm, vcpu_idx);
+    seL4_CPtr tcb = vm_get_tcb(vm);
     printf("%sInvalid instruction from [%s] at PC: 0x"XFMT"%s\n",
            ANSI_COLOR(RED, BOLD), vm->name, seL4_GetMR(0), ANSI_COLOR(RESET));
     int err = seL4_TCB_ReadRegisters(tcb, false, 0, sizeof(regs) / sizeof(regs.pc), &regs);
@@ -183,89 +135,33 @@ static int handle_exception(vm_t *vm, seL4_Word ip, seL4_Word vcpu_idx)
     return 1;
 }
 
-static int vm_vcpu_for_target_cpu(vm_t *vm, uintptr_t target_cpu)
+static int handle_psci(vm_t *vm, seL4_Word fn_number, bool convention)
 {
-    for (int i = 0; i < vm->n_vcpus; i++) {
-        if (vm->vcpus[i].target_cpu == target_cpu && vm->vcpus[i].active) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-static int vm_start_vcpu(vm_t *vm, uintptr_t target_cpu,
-                       uintptr_t entry_point_address, uintptr_t context_id)
-{
-    vcpu_t *vcpu = &vm->vcpus[vm->n_vcpus];
-    vcpu->target_cpu = target_cpu;
-    vcpu->active = true;
-
-    seL4_UserContext regs = {0};
-    sel4arch_set_bootargs(&regs, entry_point_address, 0, context_id);
-    seL4_Error err = seL4_TCB_WriteRegisters(vcpu->tcb.cptr, false, 0,
-                                             sizeof(regs) / sizeof(regs.pc), &regs);
-    if (err) {
-        ZF_LOGE("Failed to write regs\n");
-        return -1;
-    }
-
-    // TODO surely this needs some sanitising?
-    err = seL4_ARM_VCPU_WriteRegs(vcpu->vcpu.cptr, seL4_VCPUReg_VMPIDR_EL2, target_cpu);
-    if (err) {
-        ZF_LOGE("Failed to write vcpu regs\n");
-        return -1;
-    }
-
-    if (seL4_TCB_Resume(vcpu->tcb.cptr)) {
-        ZF_LOGE("Failed to resume\n");
-        return -1;
-    }
-    vm_associate_target_cpu(vm, target_cpu, vm->n_vcpus);
-    vm->n_vcpus++;
-    return 0;
-}
-
-static int handle_psci(vm_t *vm, vcpu_t *vcpu, seL4_Word fn_number, bool convention)
-{
-    seL4_UserContext *regs = fault_get_ctx(vcpu->fault);
+    seL4_UserContext *regs = fault_get_ctx(vm->fault);
     switch (fn_number) {
     case PSCI_VERSION:
         regs->x0 = (BIT(15) | BIT(1));
-        return ignore_fault(vcpu->fault);
-    case PSCI_CPU_ON: {
-        uintptr_t target_cpu = smc_get_arg(regs, 1);
-        uintptr_t entry_point_address = smc_get_arg(regs, 2);
-        uintptr_t context_id = smc_get_arg(regs, 3);
-        printf("Got PSCI_CPU_ON for %lx %lx %lx\n", target_cpu, entry_point_address, context_id);
-        if (vm->n_vcpus == CONFIG_MAX_NUM_NODES) {
-            regs->x0 = PSCI_INVALID_PARAMETERS;
-            ZF_LOGE("Too many VCPUS");
-        } else if (vm_vcpu_for_target_cpu(vm, target_cpu) != -1) {
-            printf("Already on\n");
-            regs->x0 = PSCI_ALREADY_ON;
-        } else {
-            if (vm_start_vcpu(vm, target_cpu, entry_point_address, context_id) == 0) {
-                regs->x0 = PSCI_SUCCESS;
-                printf("SUCCESS\n");
-            } else {
-                printf("Fail\n");
-                regs->x0 = PSCI_INTERNAL_FAILURE;
-            }
-        }
-        return ignore_fault(vcpu->fault);
-    }
+        regs->pc += 4;
+        seL4_TCB_WriteRegisters(vm_get_tcb(vm), false, 0,
+                                sizeof(*regs) / sizeof(regs->pc), regs);
+        return restart_fault(vm->fault);
     case PSCI_MIGRATE_INFO_TYPE:
         regs->x0 = 2; // trusted OS does not require migration
-        return ignore_fault(vcpu->fault);
+        regs->pc += 4;
+        seL4_TCB_WriteRegisters(vm_get_tcb(vm), false, 0,
+                                sizeof(*regs) / sizeof(regs->pc), regs);
+        return restart_fault(vm->fault);
+
+
     default:
         ZF_LOGE("Unhandled PSCI function id %lu\n", fn_number);
         return -1;
     }
 }
 
-static int handle_smc(vm_t *vm, vcpu_t *vcpu)
+static int handle_smc(vm_t *vm)
 {
-    fault_t *fault = vcpu->fault;
+    fault_t *fault = vm->fault;
     new_smc_fault(fault);
     seL4_UserContext *regs = fault_get_ctx(fault);
     seL4_Word id = smc_get_function_id(regs);
@@ -275,21 +171,20 @@ static int handle_smc(vm_t *vm, vcpu_t *vcpu)
     switch (service) {
     case SMC_CALL_ARM_ARCH:
         ZF_LOGE("Unhandled SMC: arm architecture call %lu\n", fn_number);
-        regs->x0 = -1;
-        return ignore_fault(vcpu->fault);
+        break;
     case SMC_CALL_CPU_SERVICE:
         ZF_LOGE("Unhandled SMC: CPU service call %lu\n", fn_number);
         break;
     case SMC_CALL_SIP_SERVICE:
         regs->x0 = -1;
         ZF_LOGW("Ignoring SiP service call %lu\n", fn_number);
-        return ignore_fault(vcpu->fault);
+        return ignore_fault(vm->fault);
     case SMC_CALL_OEM_SERVICE:
         ZF_LOGE("Unhandled SMC: OEM service call %lu\n", fn_number);
         break;
     case SMC_CALL_STD_SERVICE:
         if (fn_number < PSCI_MAX) {
-            return handle_psci(vm, vcpu, fn_number, smc_call_is_32(id));
+            return handle_psci(vm, fn_number, smc_call_is_32(id));
         }
         ZF_LOGE("Unhandled SMC: standard service call %lu\n", fn_number);
         break;
@@ -305,100 +200,12 @@ static int handle_smc(vm_t *vm, vcpu_t *vcpu)
     case SMC_CALL_TRUSTED_OS:
         ZF_LOGE("Unhandled SMC: trusted os call %lu\n", fn_number);
         break;
-    default:
+     default:
         ZF_LOGE("Unhandle SMC: unknown value service: %lu fn_number: %lu\n",
-                (unsigned long) service, fn_number);
+               (unsigned long) service, fn_number);
         break;
-    }
+     }
 
-    return -1;
-}
-
-static int create_vcpu(vm_t *vm, vka_t *vka, int priority,
-                       seL4_Word badge, seL4_CPtr endpoint, seL4_Word cspace_root_data,
-                       seL4_CPtr auth, seL4_Word vcpu_idx)
-{
-    /* Badge the endpoint */
-    if (badge & VCPU_BADGE_MASK) {
-        ZF_LOGE("Provided badge overlaps with VCPU badge mask\n");
-        return -1;
-    }
-
-    cspacepath_t src = {0};
-    cspacepath_t dst = {0};
-    badge = VCPU_BADGE_CREATE(badge, vcpu_idx);
-    printf("Assigning badge %p to vcpu id %lu\n", (void *) badge, vcpu_idx);
-    vka_cspace_make_path(vka, endpoint, &src);
-    if (vka_cspace_alloc_path(vka, &dst)) {
-        ZF_LOGE("CSpace alloc failed");
-        goto out;
-    }
-
-    if (vka_cnode_mint(&dst, &src, seL4_AllRights, badge)) {
-        goto out;
-    }
-
-    /* Copy it to the cspace of the VM for fault IPC */
-    src = dst;
-    dst.root = vm->cspace.cptr;
-    dst.capPtr = VM_FAULT_EP_SLOT + vcpu_idx;
-    dst.capDepth = VM_CSPACE_SIZE_BITS;
-    if (vka_cnode_copy(&dst, &src, seL4_AllRights)) {
-        goto out;
-    }
-
-    /* Create TCB */
-    vcpu_t *vcpu = &vm->vcpus[vcpu_idx];
-    if (vka_alloc_tcb(vka, &vcpu->tcb)) {
-        goto out;
-    }
-
-    if (seL4_TCB_Configure(vcpu->tcb.cptr, dst.capPtr,
-                           vm->cspace.cptr, cspace_root_data,
-                           vm->pd.cptr, seL4_NilData, 0, seL4_CapNull)) {
-        goto out;
-    }
-
-    if (seL4_TCB_SetSchedParams(vcpu->tcb.cptr, auth, priority, priority)) {
-        goto out;
-    }
-
-    /* Create VCPU */
-    if (vka_alloc_vcpu(vka, &vcpu->vcpu)) {
-        goto out;
-    }
-
-    if (seL4_ARM_VCPU_SetTCB(vcpu->vcpu.cptr, vcpu->tcb.cptr)) {
-        goto out;
-    }
-
-    char buf[7];
-    snprintf(buf, 7, "vcpu %d", (int) vcpu_idx);
-    NAME_THREAD(vcpu->tcb.cptr, buf);
-
-    if (seL4_TCB_SetAffinity(vcpu->tcb.cptr, vcpu_idx)) {
-        goto out;
-    }
-
-    /* Initialise fault system */
-    vcpu->fault = fault_init(vm, vcpu_idx);
-    if (!vcpu->fault) {
-        goto out;
-    }
-
-    return 0;
-
-out:
-    ZF_LOGE("Failed to create vcpu\n");
-    if (vcpu->tcb.cptr != 0) {
-        vka_free_object(vka, &vcpu->tcb);
-    }
-    if (vcpu->vcpu.cptr != 0) {
-        vka_free_object(vka, &vcpu->vcpu);
-    }
-    if (dst.capPtr != 0) {
-        vka_cspace_free(vka, dst.capPtr);
-    }
     return -1;
 }
 
@@ -409,15 +216,19 @@ int vm_create(const char *name, int priority,
               vm_t *vm)
 {
 
+    seL4_Word null_cap_data = seL4_NilData;
+    seL4_Word cspace_root_data;
+    cspacepath_t src, dst;
+
     bzero(vm, sizeof(vm_t));
     vm->name = name;
     vm->ndevices = 0;
     vm->nhooks = 0;
+    vm->entry_point = NULL;
     vm->vka = vka;
     vm->simple = simple;
     vm->vmm_vspace = vmm_vspace;
     vm->io_ops = io_ops;
-    vm->n_vcpus = 1;
 #ifdef CONFIG_LIB_SEL4_ARM_VMM_VCHAN_SUPPORT
     vm->vchan_num_cons = 0;
     vm->vchan_cons = NULL;
@@ -426,10 +237,8 @@ int vm_create(const char *name, int priority,
     /* Create a cspace */
     int err = vka_alloc_cnode_object(vka, VM_CSPACE_SIZE_BITS, &vm->cspace);
     assert(!err);
-    cspacepath_t src = {0};
-    cspacepath_t dst = {0};
     vka_cspace_make_path(vka, vm->cspace.cptr, &src);
-    seL4_Word cspace_root_data = api_make_guard_skip_word(seL4_WordBits - VM_CSPACE_SIZE_BITS);
+    cspace_root_data = api_make_guard_skip_word(seL4_WordBits - VM_CSPACE_SIZE_BITS);
     dst.root = vm->cspace.cptr;
     dst.capPtr = VM_CSPACE_SLOT;
     dst.capDepth = VM_CSPACE_SIZE_BITS;
@@ -444,11 +253,41 @@ int vm_create(const char *name, int priority,
     err = vmm_get_guest_vspace(vmm_vspace, &vm->vm_vspace, vka, vm->pd.cptr);
     assert(!err);
 
-    for (int i = 0; i < CONFIG_MAX_NUM_NODES; i++) {
-        err = create_vcpu(vm, vka, priority - 1, vm_badge, vmm_endpoint, cspace_root_data,
-                          simple_get_tcb(simple), i);
-        ZF_LOGF_IF(err, "Failed to create vcpu %d\n", i);
-    }
+    /* Badge the endpoint */
+    vka_cspace_make_path(vka, vmm_endpoint, &src);
+    err = vka_cspace_alloc_path(vka, &dst);
+    assert(!err);
+    err = vka_cnode_mint(&dst, &src, seL4_AllRights, vm_badge);
+    assert(!err);
+    /* Copy it to the cspace of the VM for fault IPC */
+    src = dst;
+    dst.root = vm->cspace.cptr;
+    dst.capPtr = VM_FAULT_EP_SLOT;
+    dst.capDepth = VM_CSPACE_SIZE_BITS;
+    err = vka_cnode_copy(&dst, &src, seL4_AllRights);
+    assert(!err);
+
+    /* Create TCB */
+    err = vka_alloc_tcb(vka, &vm->tcb);
+    assert(!err);
+    err = seL4_TCB_Configure(vm_get_tcb(vm), VM_FAULT_EP_SLOT,
+                             vm->cspace.cptr, cspace_root_data,
+                             vm->pd.cptr, null_cap_data, 0, seL4_CapNull);
+    assert(!err);
+
+    err = seL4_TCB_SetSchedParams(vm_get_tcb(vm), simple_get_tcb(simple), priority - 1, priority - 1);
+    assert(!err);
+
+    /* Create VCPU */
+    err = vka_alloc_vcpu(vka, &vm->vcpu);
+    assert(!err);
+    err = seL4_ARM_VCPU_SetTCB(vm->vcpu.cptr, vm_get_tcb(vm));
+    assert(!err);
+
+    /* Initialise fault system */
+    vm->fault = fault_init(vm);
+    assert(vm->fault);
+
     return err;
 }
 
@@ -458,7 +297,7 @@ int vm_set_bootargs(vm_t *vm, seL4_Word pc, seL4_Word mach_type, seL4_Word atags
     seL4_UserContext regs;
     assert(vm);
     /* Write CPU registers */
-    seL4_CPtr tcb = vm_get_tcb(vm, 0);
+    seL4_CPtr tcb = vm_get_tcb(vm);
     int err = seL4_TCB_ReadRegisters(tcb, false, 0, sizeof(regs) / sizeof(regs.pc), &regs);
     assert(!err);
     sel4arch_set_bootargs(&regs, pc, mach_type, atags);
@@ -469,15 +308,12 @@ int vm_set_bootargs(vm_t *vm, seL4_Word pc, seL4_Word mach_type, seL4_Word atags
 
 int vm_start(vm_t *vm)
 {
-    return seL4_TCB_Resume(vm_get_tcb(vm, 0));
+    return seL4_TCB_Resume(vm_get_tcb(vm));
 }
 
 int vm_stop(vm_t *vm)
 {
-    /* kill all the vcpus */
-    for (int i = CONFIG_MAX_NUM_NODES - 1; i >= 0; i--) {
-        seL4_TCB_Suspend(vm_get_tcb(vm, i));
-    }
+    return seL4_TCB_Suspend(vm_get_tcb(vm));
 }
 
 
@@ -531,12 +367,12 @@ static void sys_nop(vm_t *vm, seL4_UserContext *regs)
     DSTRACE("NOP syscall from [%s]\n", vm->name);
 }
 
-static int handle_syscall(vm_t *vm, seL4_Word length, seL4_Word vcpu_idx)
+static int handle_syscall(vm_t *vm, seL4_Word length)
 {
     seL4_Word syscall = seL4_GetMR(seL4_UnknownSyscall_Syscall);
     seL4_Word ip = seL4_GetMR(seL4_UnknownSyscall_FaultIP);
 
-    seL4_CPtr tcb = vm_get_tcb(vm, vcpu_idx);
+    seL4_CPtr tcb = vm_get_tcb(vm);
     seL4_UserContext regs = {0};
     seL4_Error err = seL4_TCB_ReadRegisters(tcb, false, 0, sizeof(regs) / sizeof(regs.pc), &regs);
     assert(!err);
@@ -563,14 +399,12 @@ static int handle_syscall(vm_t *vm, seL4_Word length, seL4_Word vcpu_idx)
     return 0;
 }
 
-int vm_event(vm_t *vm, seL4_MessageInfo_t tag, seL4_Word badge)
+int vm_event(vm_t *vm, seL4_MessageInfo_t tag)
 {
     seL4_Word label = seL4_MessageInfo_get_label(tag);
     seL4_Word length = seL4_MessageInfo_get_length(tag);
     int err = 0;
-    seL4_Word vcpu_idx = VCPU_BADGE_IDX(badge);
-    vcpu_t *vcpu = &vm->vcpus[vcpu_idx];
-    fault_t *fault = vcpu->fault;
+    fault_t *fault = vm->fault;
 
     switch (label) {
     case seL4_Fault_VMFault: {
@@ -579,8 +413,6 @@ int vm_event(vm_t *vm, seL4_MessageInfo_t tag, seL4_Word badge)
         do {
             err = handle_page_fault(vm, fault);
             if (err) {
-                printf("Error handling page fault\n");
-                assert(fault_handled(fault));
                 return -1;
             }
         } while (!fault_handled(fault));
@@ -589,7 +421,7 @@ int vm_event(vm_t *vm, seL4_MessageInfo_t tag, seL4_Word badge)
 
     case seL4_Fault_UnknownSyscall: {
         assert(length == seL4_UnknownSyscall_Length);
-        err = handle_syscall(vm, length, vcpu_idx);
+        err = handle_syscall(vm, length);
         assert(!err);
         if (!err) {
             seL4_MessageInfo_t reply;
@@ -602,7 +434,7 @@ int vm_event(vm_t *vm, seL4_MessageInfo_t tag, seL4_Word badge)
     case seL4_Fault_UserException: {
         assert(length == seL4_UserException_Length);
         seL4_Word ip = seL4_GetMR(0);
-        err = handle_exception(vm, ip, vcpu_idx);
+        err = handle_exception(vm, ip);
         assert(!err);
         if (!err) {
             seL4_MessageInfo_t reply = seL4_MessageInfo_new(0, 0, 0, 0);
@@ -616,7 +448,7 @@ int vm_event(vm_t *vm, seL4_MessageInfo_t tag, seL4_Word badge)
         /* Currently not handling spurious IRQs */
         assert(idx >= 0);
 
-        err = handle_vgic_maintenance(vm, idx, vcpu_idx);
+        err = handle_vgic_maintenance(vm, idx);
         assert(!err);
         if (!err) {
             seL4_MessageInfo_t reply = seL4_MessageInfo_new(0, 0, 0, 0);
@@ -629,34 +461,23 @@ int vm_event(vm_t *vm, seL4_MessageInfo_t tag, seL4_Word badge)
         assert(length == seL4_VCPUFault_Length);
         uint32_t hsr = seL4_GetMR(seL4_UnknownSyscall_ARG0);
         /* check if the exception class (bits 26-31) of the HSR indicate WFI/WFE */
-        uint32_t exception_class = HSR_EC(hsr);
+        uint32_t exception_class = hsr >> 26;
         switch (exception_class) {
         case HSR_EC_WFI_WFE:
             /* generate a new WFI fault */
             new_wfi_fault(fault);
             return 0;
-        case HSR_EC_SMC32:
-        case HSR_EC_SMC64: {
-            int res = handle_smc(vm, vcpu);
-            assert(fault_handled(fault));
-            return res;
-        }
-        case HSR_EC_MSR_MRS_OTHER: {
-            union hsr hsr_un = { .bits = hsr };
-            printf("is read %lu\ncrm %lu\nreg %lu\ncrn %lu\nop1 %lu\nop2 %lu\nop0%lu\n",
-               hsr_un.s.read, hsr_un.s.crm, hsr_un.s.reg, hsr_un.s.crn, hsr_un.s.op1, hsr_un.s.op2, hsr_un.s.op0);
-        }
+        case HSR_EC_SMC:
+            return handle_smc(vm);
         default:
-            printf("Exception class = %u\n", exception_class);
             printf("Unhandled VCPU fault from [%s]: HSR 0x%08x\n", vm->name, hsr);
             if ((hsr & 0xfc300000) == 0x60200000 || hsr == 0xf2000800) {
                 new_wfi_fault(fault);
                 seL4_UserContext *regs = fault_get_ctx(fault);
                 regs->pc += 4;
-                seL4_TCB_WriteRegisters(vm_get_tcb(vm, vcpu_idx), false, 0,
-                                        sizeof(*regs) / sizeof(regs->pc), regs);
+                seL4_TCB_WriteRegisters(vm_get_tcb(vm), false, 0,
+                                    sizeof(*regs) / sizeof(regs->pc), regs);
                 restart_fault(fault);
-                assert(fault_handled(fault));
                 return 0;
             }
             return -1;
@@ -668,7 +489,7 @@ int vm_event(vm_t *vm, seL4_MessageInfo_t tag, seL4_Word badge)
         printf("Unknown fault from [%s]: label=%p length=%p\n",
                vm->name, (void *) label, (void *) length);
         return -1;
-    }    assert(fault_handled(fault));
+    }
     return 0;
 }
 
@@ -739,10 +560,8 @@ int vm_add_device(vm_t *vm, const struct device *d)
     assert(d != NULL);
     if (vm->ndevices < MAX_DEVICES_PER_VM) {
         vm->devices[vm->ndevices++] = *d;
-        printf("Added device at %p <--> %p\n", (void*) d->pstart, (void *) d->pstart + d->size);
         return 0;
     } else {
-        assert(0);
         return -1;
     }
 }

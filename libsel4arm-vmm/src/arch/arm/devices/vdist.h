@@ -11,7 +11,7 @@
  */
 
 //#define DEBUG_IRQ
-//#define DEBUG_DIST
+#define DEBUG_DIST
 
 #ifdef DEBUG_IRQ
 #define DIRQ(...) do{ printf("VDIST: "); printf(__VA_ARGS__); }while(0)
@@ -296,7 +296,7 @@ static inline int handle_vgic_dist_fault(struct device *d, vm_t *vm, fault_t *fa
                 int irq = CTZ(data);
                 data &= ~(1U << irq);
                 irq += (offset - 0x200) * 8;
-                vgic_dist_set_pending_irq(vgic, vm->vcpu.cptr, irq);
+                vgic_dist_set_pending_irq(vgic, vm_get_vcpu(vm, fault->vcpu_idx), irq);
             }
             return ignore_fault(fault);
 

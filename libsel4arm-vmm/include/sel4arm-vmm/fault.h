@@ -42,6 +42,8 @@ typedef enum {
 struct fault {
 /// The VM associated with the fault
     vm_t *vm;
+/// The index of the vcpu associated with the fault
+    seL4_Word vcpu_idx;
 /// Reply capability to the faulting TCB
     cspacepath_t reply_cap;
 /// VM registers at the time of the fault
@@ -76,10 +78,11 @@ typedef struct fault fault_t;
  * Initialise a fault structure.
  * The structure will be bound to a VM and a reply cap slot
  * will be reserved.
- * @param[in] vm    The VM that the fault structure should be bound to
+ * @param[in] vm          The VM that the fault structure should be bound to
+ * @param[in] vcpu_idx    The index of the vcpu that the fault structure applies to
  * @return          An initialised fault structure handle or NULL on failure
  */
-fault_t *fault_init(vm_t *vm);
+fault_t *fault_init(vm_t *vm, seL4_Word vcpu_idx);
 
 /**
  * Populate an initialised fault structure with fault data obtained from
