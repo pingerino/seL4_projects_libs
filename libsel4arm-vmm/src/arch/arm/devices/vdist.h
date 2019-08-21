@@ -28,8 +28,12 @@
 #define IRQ_IDX(irq) ((irq) / 32)
 #define IRQ_BIT(irq) (1U << ((irq) % 32))
 
-#define GIC_SGI_IRQ_MIN 16
-#define GIC_SGI_IRQ_MAX 32
+#define GIC_SGI_IRQ_MIN    0
+#define GIC_SGI_IRQ_MAX   15
+#define GIC_PPI_IRQ_MIN   16
+#define GIC_PPI_IRQ_MAX   31
+#define GIC_SPI_IRQ_MIN   32
+#define GIC_SPI_IRQ_MAX   1019
 
 #define not_pending(...) !is_pending(__VA_ARGS__)
 #define not_active(...)  !is_active(__VA_ARGS__)
@@ -177,7 +181,7 @@ static inline int vgic_dist_disable_irq(struct gic_dist_map *gic_dist, int irq)
     return 0;
 }
 
-static inline int vgic_dist_set_pending_irq(vgic_t *vgic, seL4_CPtr vcpu, int irq)
+static inline int vgic_dist_set_pending_irq(vgic_t *vgic, seL4_CPtr vcpu, int irq, seL4_Word vcpu_idx)
 {
 #ifdef CONFIG_LIB_SEL4_ARM_VMM_VCHAN_SUPPORT
     vm->lock();
@@ -191,7 +195,7 @@ static inline int vgic_dist_set_pending_irq(vgic_t *vgic, seL4_CPtr vcpu, int ir
         DDIST("Pending set: Inject IRQ from pending set (%d)\n", irq);
 
         vgic_dist_set_pending(gic_dist, virq_data->virq, true);
-        int err = vgic_vcpu_inject_irq(vgic, vcpu, virq_data);
+        int err = vgic_vcpu_inject_irq(vgic, vcpu, virq_data, vcpu_idx);
         assert(!err);
 
 #ifdef CONFIG_LIB_SEL4_ARM_VMM_VCHAN_SUPPORT
@@ -230,7 +234,7 @@ static inline int handle_vgic_dist_fault(struct device *d, vm_t *vm, fault_t *fa
 
     /* Out of range */
     if (offset < 0 || offset >= sizeof(struct gic_dist_map)) {
-        DDIST("offset out of range %x %x\n", offset, sizeof(struct gic_dist_map));
+        DDIST("offset out of range %d %zu\n", offset, sizeof(struct gic_dist_map));
         return ignore_fault(fault);
 
         /* Read fault */
@@ -296,7 +300,8 @@ static inline int handle_vgic_dist_fault(struct device *d, vm_t *vm, fault_t *fa
                 int irq = CTZ(data);
                 data &= ~(1U << irq);
                 irq += (offset - 0x200) * 8;
-                vgic_dist_set_pending_irq(vgic, vm->vcpu.cptr, irq);
+                vgic_dist_set_pending_irq(vgic, vm_get_vcpu(vm, fault->vcpu_idx), irq,
+                        fault->vcpu_idx);
             }
             return ignore_fault(fault);
 

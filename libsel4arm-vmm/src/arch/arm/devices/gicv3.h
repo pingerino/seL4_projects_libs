@@ -126,9 +126,9 @@ typedef struct {
     /// Virtual distributer registers
     struct gic_dist_map *dist;
     /// Virtual redistributer registers for control and physical LPIs
-    struct gic_rdist_map *rdist;
+    struct gic_rdist_map *rdist[CONFIG_MAX_NUM_NODES];
     /// Virtual redistributer for SGI and PPIs
-    struct gic_rdist_sgi_ppi_map *sgi;
+    struct gic_rdist_sgi_ppi_map *sgi[CONFIG_MAX_NUM_NODES];
 } vgic_reg_t;
 
 static inline bool gic_dist_is_enabled(struct gic_dist_map *gic_dist)

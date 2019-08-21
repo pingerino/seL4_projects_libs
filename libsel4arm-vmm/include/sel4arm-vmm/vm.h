@@ -43,6 +43,15 @@ struct reboot_hooks {
     void *token;
 };
 
+typedef struct vcpu {
+    uintptr_t target_cpu;
+    vka_object_t tcb;
+    vka_object_t vcpu;
+    fault_t *fault;
+    bool active;
+    int int_allow; // what is this0?
+} vcpu_t;
+
 struct vm {
     /* Identification */
     const char *name;
@@ -56,20 +65,15 @@ struct vm {
     vspace_t vm_vspace;
     sel4utils_alloc_data_t data;
     vka_object_t cspace;
-    vka_object_t tcb;
     vka_object_t pd;
-    vka_object_t vcpu;
+    int n_vcpus;
+    vcpu_t vcpus[CONFIG_MAX_NUM_NODES];
     /* Installed devices */
     struct device devices[MAX_DEVICES_PER_VM];
     int ndevices;
     /* Installed reboot hooks */
     struct reboot_hooks rb_hooks[MAX_REBOOT_HOOKS_PER_VM];
     int nhooks;
-
-    /* Other */
-    void *entry_point;
-    /* Fault structure */
-    fault_t *fault;
 
     /* Virtual PCI Host Bridge */
     vmm_pci_space_t *pci;
@@ -184,9 +188,10 @@ int vm_stop(vm_t *vm);
  * Handle a VM event
  * @param[in] vm   A handle to the VM that triggered the event
  * @param[in] tag  The tag of the incomming message
+ * @param[in] badge The badge of the incomming message
  * @return     0 on success, otherwise, the VM should be shut down
  */
-int vm_event(vm_t *vm, seL4_MessageInfo_t tag);
+int vm_event(vm_t *vm, seL4_MessageInfo_t tag, seL4_Word badge);
 
 /**
  * Register or replace a virtual IRQ definition
@@ -197,11 +202,20 @@ int vm_event(vm_t *vm, seL4_MessageInfo_t tag);
 virq_handle_t vm_virq_new(vm_t *vm, int virq, void (*ack)(void *), void *token);
 
 /**
+ * Register or replace a virtual IRQ definition for a per-vcpu virq.
+ * @param[in] virq     The IRQ number to inject
+ * @param[in] vcpu_idx The index of the VCPU that the irq is for.
+ * @param[in] ack      A function to call when the VM ACKs the IRQ
+ * @param[in] token    A token to pass, unmodified, to the ACK callback function
+ */
+virq_handle_t vm_virq_vcpu_new(vm_t *vm, seL4_Word vcpu_idx, int irq, void (*ack)(void *), void *token);
+/**
  * Inject an IRQ into a VM
  * @param[in] virq  A handle to the virtual IRQ
+ * @param[in] vcpu_idx  The vpu identifier for which vcpu to inject the irq into.
  * @return          0 on success
  */
-int vm_inject_IRQ(virq_handle_t virq);
+int vm_inject_IRQ(virq_handle_t virq, seL4_Word vcpu_idx);
 
 /**
  * Install a service into the VM

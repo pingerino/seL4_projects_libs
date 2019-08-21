@@ -13,4 +13,7 @@
 
 #define VIRTUAL_TIMER_IRQ 27
 
-int handle_vgic_maintenance(vm_t *vm, int idx);
+int handle_vgic_maintenance(vm_t *vm, int idx, seL4_Word vcpu_idx);
+
+// TODO not sure this is needed
+int vm_enable_irq(vm_t *vm, int irq_idx, seL4_Word vcpu_idx);

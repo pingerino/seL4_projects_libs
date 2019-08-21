@@ -62,14 +62,14 @@ static struct gic_dist_map *vgic_priv_get_dist(struct device *d) {
     return priv_get_dist(vgic->registers);
 }
 
-int vgic_vcpu_inject_irq(vgic_t *vgic, seL4_CPtr vcpu, struct virq_handle *irq)
+int vgic_vcpu_inject_irq(vgic_t *vgic, seL4_CPtr vcpu, struct virq_handle *irq, seL4_Word vcpu_idx)
 {
     int i = vgic_find_free_irq(vgic);
     seL4_Error err = seL4_ARM_VCPU_InjectIRQ(vcpu, irq->virq, 0, 0, i);
     assert((i < 4) || err);
     if (!err) {
         /* Shadow */
-        vgic_shadow_irq(vgic, i, irq);
+        vgic_shadow_irq(vgic, i, irq, vcpu_idx);
         return err;
     } else {
         int error = vgic_add_overflow(vgic, irq);
