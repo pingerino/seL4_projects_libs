@@ -141,7 +141,7 @@ static int vgic_sgi_enable_irq(struct device *d, vm_t *vm, int irq)
 {
     struct gic_rdist_sgi_ppi_map *gic_sgi = vgic_priv_get_rdist_sgi(d);
     vgic_t *vgic = vgic_device_get_vgic(d);
-    if (irq >= GIC_SGI_IRQ_MIN) {
+    if (irq < GIC_SPI_IRQ_MIN) {
         DDIST("sgi enabling irq %d\n", irq);
         sgi_set_enable(gic_sgi, irq, true);
         struct virq_handle *virq_data = virq_find_irq_data(vgic, irq);
@@ -162,7 +162,7 @@ static int vgic_sgi_disable_irq(struct device *d, vm_t *vm, int irq)
 {
     /* STATE g) */
     struct gic_rdist_sgi_ppi_map *gic_sgi = vgic_priv_get_rdist_sgi(d);
-    if (irq >= GIC_SGI_IRQ_MIN) {
+    if (irq < GIC_SPI_IRQ_MIN) {
         DDIST("sgi disabling irq %d\n", irq);
         sgi_set_enable(gic_sgi, irq, false);
     }

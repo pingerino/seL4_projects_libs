@@ -28,8 +28,12 @@
 #define IRQ_IDX(irq) ((irq) / 32)
 #define IRQ_BIT(irq) (1U << ((irq) % 32))
 
-#define GIC_SGI_IRQ_MIN 16
-#define GIC_SGI_IRQ_MAX 32
+#define GIC_SGI_IRQ_MIN    0
+#define GIC_SGI_IRQ_MAX   15
+#define GIC_PPI_IRQ_MIN   16
+#define GIC_PPI_IRQ_MAX   31
+#define GIC_SPI_IRQ_MIN   32
+#define GIC_SPI_IRQ_MAX   1019
 
 #define not_pending(...) !is_pending(__VA_ARGS__)
 #define not_active(...)  !is_active(__VA_ARGS__)
