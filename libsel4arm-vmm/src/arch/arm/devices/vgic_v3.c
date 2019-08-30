@@ -201,19 +201,25 @@ static int handle_vgic_rdist_fault(struct device *d, vm_t *vm, fault_t *fault)
 
     /* Out of range */
     if (offset < 0 || offset >= sizeof(struct gic_rdist_map)) {
-        DDIST("rdist offset out of range %x %x\n", offset, sizeof(struct gic_rdist_map));
+        DDIST("rdist offset out of range %d %zu\n", offset,(size_t) sizeof(struct gic_rdist_map));
         return ignore_fault(fault);
     /* Read fault */
     } else if (fault_is_read(fault)) {
+        DDIST("Rdist read at %x\n", offset);
         fault_set_data(fault, *reg);
         return advance_fault(fault);
     } else {
         switch (act) {
         case ACTION_READONLY:
+            *reg = fault_emulate(fault, *reg);
+            uint32_t data = fault_get_data(fault);
+            DDIST("RDIST %lu: ignoring fault on offset 0x%x --> 0x%x\n", fault->vcpu_idx, offset, data);
             return ignore_fault(fault);
         case ACTION_UNKNOWN:
         default:
-            DDIST("Unknown action on offset 0x%x\n", offset);
+            *reg = fault_emulate(fault, *reg);
+            data = fault_get_data(fault);
+            DDIST("RDIST %lu: Unknown action on offset 0x%x --> 0x%x\n", fault->vcpu_idx, offset, data);
             return ignore_fault(fault);
         }
     }
@@ -231,7 +237,7 @@ static int handle_vgic_sgi_fault(struct device *d, vm_t *vm, fault_t *fault)
 
     /* Out of range */
     if (offset < 0 || offset >= sizeof(struct gic_rdist_sgi_ppi_map)) {
-        DDIST("sgi offset out of range %x %x\n", offset, sizeof(struct gic_rdist_sgi_ppi_map));
+        DDIST("sgi offset out of range %d %zu\n", offset, (size_t) sizeof(struct gic_rdist_sgi_ppi_map));
         return ignore_fault(fault);
 
         /* Read fault */
@@ -242,6 +248,9 @@ static int handle_vgic_sgi_fault(struct device *d, vm_t *vm, fault_t *fault)
         uint32_t data;
         switch (act) {
         case ACTION_READONLY:
+            *reg = fault_emulate(fault, *reg);
+            data = fault_get_data(fault);
+            DDIST("SGI %lu: ignoring write on offset 0x%x --> 0x%x\n", fault->vcpu_idx, offset, data);
             return ignore_fault(fault);
         case ACTION_ENABLE_SET:
             data = fault_get_data(fault);
@@ -277,7 +286,9 @@ static int handle_vgic_sgi_fault(struct device *d, vm_t *vm, fault_t *fault)
 
         case ACTION_UNKNOWN:
         default:
-            DDIST("Unknown action on offset 0x%x\n", offset);
+            *reg = fault_emulate(fault, *reg);
+            data = fault_get_data(fault);
+            DDIST("SGI %lu: Unknown write on offset 0x%x --> 0x%x\n", fault->vcpu_idx, offset, data);
             return ignore_fault(fault);
         }
     }

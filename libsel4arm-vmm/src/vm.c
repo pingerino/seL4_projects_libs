@@ -795,7 +795,7 @@ int vm_copyout_atags(vm_t *vm, struct atag_list *atags, uint32_t addr)
     void *buf = vmm_addr + (addr & 0xfff);
     for (atag_cur = atags; atag_cur != NULL; atag_cur = atag_cur->next) {
         int tag_size = atags_size_bytes(atag_cur);
-        DVM("ATAG copy 0x%x<-0x%x %d\n", (uint32_t)buf, (uint32_t)atag_cur->hdr, tag_size);
+        DVM("ATAG copy %p<-%p %d\n", (void *)buf, (void *)atag_cur->hdr, tag_size);
         memcpy(buf, atag_cur->hdr, tag_size);
         buf += tag_size;
     }

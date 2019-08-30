@@ -245,6 +245,9 @@ static inline int handle_vgic_dist_fault(struct device *d, vm_t *vm, fault_t *fa
         uint32_t data;
         switch (act) {
         case ACTION_READONLY:
+            *reg = fault_emulate(fault, *reg);
+            data = fault_get_data(fault);
+            DDIST("%lu: Readonly write on offset 0x%x --> 0x%x\n", fault->vcpu_idx, offset, data);
             return ignore_fault(fault);
 
         case ACTION_PASSTHROUGH:
@@ -325,7 +328,9 @@ static inline int handle_vgic_dist_fault(struct device *d, vm_t *vm, fault_t *fa
 
         case ACTION_UNKNOWN:
         default:
-            DDIST("Unknown action on offset 0x%x\n", offset);
+            *reg = fault_emulate(fault, *reg);
+            data = fault_get_data(fault);
+            DDIST("%lu: Unknown write on offset 0x%x -> 0x%x\n", fault->vcpu_idx, offset, data);
             return ignore_fault(fault);
         }
     }
