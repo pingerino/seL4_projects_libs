@@ -32,3 +32,23 @@ static inline seL4_Word smc_set_return_value(seL4_UserContext *u, seL4_Word val)
 {
     u->r0 = val;
 }
+
+static inline seL4_Word smc_get_arg(seL4_UserContext *u, seL4_Word arg)
+{
+    switch (arg) {
+    case 1:
+        return u->r1;
+    case 2:
+        return u->r2;
+    case 3:
+        return u->r3;
+    case 4:
+        return u->r4;
+    case 5:
+        return u->r5;
+    case 6:
+        return u->r6;
+    default:
+        ZF_LOGF("SMC only has 6 argument registers");
+    }
+}

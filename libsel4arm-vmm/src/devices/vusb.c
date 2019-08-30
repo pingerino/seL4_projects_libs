@@ -144,7 +144,7 @@ static void vusb_inject_irq(vusb_device_t *vusb)
     vusb->ctrl_regs->intr = 1;
     if (vusb->int_pending == 0) {
         vusb->int_pending = 1;
-        vm_inject_IRQ(vusb->virq);
+        vm_inject_IRQ(vusb->virq, 0);
     }
 }
 
@@ -311,7 +311,7 @@ static void vusb_ack(void *token)
     vusb_device_t *vusb = token;
     if (vusb->ctrl_regs->intr) {
         /* Another IRQ occured */
-        vm_inject_IRQ(vusb->virq);
+        vm_inject_IRQ(vusb->virq, 0);
     } else {
         vusb->int_pending = 0;
     }

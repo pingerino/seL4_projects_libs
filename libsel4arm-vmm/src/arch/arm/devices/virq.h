@@ -25,19 +25,20 @@ struct virq_handle {
      vm_t *vm;
 };
 
-struct lr_of {
+typedef struct lr_of {
      struct virq_handle irqs[MAX_LR_OVERFLOW]; /* circular buffer */
      size_t head;
      size_t tail;
      bool full;
-};
+} lr_of_t;
 
 typedef struct vgic {
 /// Mirrors the vcpu list registers
-     struct virq_handle *irq[63];
+     struct virq_handle *irq[CONFIG_MAX_NUM_NODES][63]; // todo constant
 /// IRQs that would not fit in the vcpu list registers
-     struct lr_of lr_overflow;
+     lr_of_t lr_overflow[CONFIG_MAX_NUM_NODES];
 /// Complete set of virtual irqs
+     struct virq_handle *vsgi_vppi[CONFIG_MAX_NUM_NODES][32]; // todo constant
      struct virq_handle *virqs[MAX_VIRQS];
 /// Virtual distributer registers
      void *registers;
@@ -62,8 +63,7 @@ static inline void virq_ack(struct virq_handle *irq)
 
 static inline struct virq_handle *virq_find_irq_data(vgic_t *vgic, int virq)
 {
-    int i;
-    for (i = 0; i < MAX_VIRQS; i++) {
+    for (int i = 0; i < MAX_VIRQS; i++) {
         if (vgic->virqs[i] && vgic->virqs[i]->virq == virq) {
             return vgic->virqs[i];
          }
@@ -83,56 +83,121 @@ static inline int virq_add(vgic_t *vgic, struct virq_handle *virq_data)
     return -1;
 }
 
-static inline int vgic_find_free_irq(vgic_t *vgic) {
+static inline int vgic_lr_has_virq(vgic_t *vgic, int vcpu_idx, struct virq_handle *virq)
+{
     for (int i = 0; i < 64; i++) {
-        if (vgic->irq[i] == NULL) {
+        if (vgic->irq[vcpu_idx][i] == NULL) {
+            return false;
+        }
+        if (vgic->irq[vcpu_idx][i] == virq) {
+            return true;
+        }
+        if (vgic->irq[vcpu_idx][i]->virq == virq->virq) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static inline int vgic_find_free_irq(vgic_t *vgic, int vcpu) {
+    for (int i = 0; i < 64; i++) {
+        if (vgic->irq[vcpu][i] == NULL) {
             return i;
         }
     }
     return -1;
 }
 
-static inline void vgic_shadow_irq(vgic_t *vgic, int i, struct virq_handle *irq)
+static inline void vgic_shadow_irq(vgic_t *vgic, int i, struct virq_handle *irq, int vcpu)
 {
     /* Shadow */
-    vgic->irq[i] = irq;
+    vgic->irq[vcpu][i] = irq;
 }
 
-static inline int vgic_add_overflow(vgic_t *vgic, struct virq_handle *irq)
+static inline int vgic_add_overflow_cpu(lr_of_t *lr_overflow, struct virq_handle *irq)
 {
     /* Add to overflow list */
-    int idx = vgic->lr_overflow.tail;
-    if (unlikely(vgic->lr_overflow.full)) {
+    int idx = lr_overflow->tail;
+    if (unlikely(lr_overflow->full)) {
         ZF_LOGE("too many overflow irqs");
         return -1;
     }
-    vgic->lr_overflow.irqs[idx] = *irq;
-    vgic->lr_overflow.full = (vgic->lr_overflow.head == LR_OF_NEXT(vgic->lr_overflow.tail));
-    if (!vgic->lr_overflow.full) {
-        vgic->lr_overflow.tail = LR_OF_NEXT(idx);
+    lr_overflow->irqs[idx] = *irq;
+    lr_overflow->full = (lr_overflow->head == LR_OF_NEXT(lr_overflow->tail));
+    if (!lr_overflow->full) {
+        lr_overflow->tail = LR_OF_NEXT(idx);
     }
     return 0;
 }
 
-int vgic_vcpu_inject_irq(vgic_t *vgic, seL4_CPtr vcpu, struct virq_handle *irq);
+static inline int vgic_add_overflow(vgic_t *vgic, struct virq_handle *irq, seL4_Word vcpu_idx)
+{
+    assert(vcpu_idx < CONFIG_MAX_NUM_NODES);
+    assert(vcpu_idx >= 0);
+    return vgic_add_overflow_cpu(&vgic->lr_overflow[vcpu_idx], irq);
+}
+
+int vgic_vcpu_inject_irq(vgic_t *vgic, seL4_CPtr vcpu, struct virq_handle *irq, seL4_Word vcpu_idx);
 
 /* Check the overflow list for pending IRQs */
-static inline int vgic_handle_overflow(vgic_t *vgic, seL4_CPtr vcpu)
+static inline int vgic_handle_overflow_cpu(vgic_t *vgic, lr_of_t *lr_overflow, seL4_CPtr vcpu,
+        seL4_Word vcpu_idx)
 {
     /* copy tail, as vgic_vcpu_inject_irq can mutate it, and we do
      * not want to process any new overflow irqs */
-    size_t tail = vgic->lr_overflow.tail;
-    for (size_t i = vgic->lr_overflow.head; i != tail; i = LR_OF_NEXT(i)) {
-        if (vgic_vcpu_inject_irq(vgic, vcpu, &vgic->lr_overflow.irqs[i]) == 0) {
-            vgic->lr_overflow.head = LR_OF_NEXT(i);
-            vgic->lr_overflow.full = (vgic->lr_overflow.head == LR_OF_NEXT(vgic->lr_overflow.tail));
+    size_t tail = lr_overflow->tail;
+    for (size_t i = lr_overflow->head; i != tail; i = LR_OF_NEXT(i)) {
+        if (vgic_vcpu_inject_irq(vgic, vcpu, &lr_overflow->irqs[i], vcpu_idx) == 0) {
+            lr_overflow->head = LR_OF_NEXT(i);
+            lr_overflow->full = (lr_overflow->head == LR_OF_NEXT(lr_overflow->tail));
         } else {
             break;
         }
     }
 }
 
-virq_handle_t vm_virq_new(vm_t *vm, int virq, void (*ack)(void *), void *token)
+
+static inline int vgic_handle_overflow(vgic_t *vgic, seL4_CPtr vcpu_cptr, seL4_Word vcpu_id)
+{
+    assert(vcpu_id < CONFIG_MAX_NUM_NODES);
+    assert(vcpu_id >= 0);
+    if (vgic->lr_overflow[vcpu_id].head != vgic->lr_overflow[vcpu_id].tail) {
+        printf("%lu Handling overflow\n", vcpu_id);
+    }
+    return vgic_handle_overflow_cpu(vgic, &vgic->lr_overflow[vcpu_id], vcpu_cptr, vcpu_id);
+}
+
+static inline void virq_init(virq_handle_t virq, vm_t *vm, int irq, void (*ack)(void *),
+                        void *token)
+{
+
+    virq->virq = irq;
+    virq->token = token;
+    virq->ack = ack;
+    virq->vm = vm;
+}
+
+static inline virq_handle_t virq_new_sgi_ppi(vm_t *vm, vgic_t *vgic, seL4_Word vcpu_idx,
+                                             int irq, void (*ack)(void *), void *token)
+{
+    if (vgic->vsgi_vppi[vcpu_idx][irq] != NULL) {
+        ZF_LOGE("VIRQ %d already registered for VCPU %lu\n", irq, vcpu_idx);
+        return NULL;
+    }
+
+    virq_handle_t virq = calloc(1, sizeof(struct virq_handle));
+    if (virq == NULL) {
+        return NULL;
+    }
+
+    virq_init(virq, vm, irq, ack, token);
+    vgic->vsgi_vppi[vcpu_idx][irq] = virq;
+    return virq;
+}
+
+
+static inline virq_handle_t virq_new(vm_t *vm, int virq, void (*ack)(void *), void *token,
+        seL4_Word vcpu_idx)
 {
     struct virq_handle *virq_data;
     struct device *vgic_device;
@@ -146,18 +211,36 @@ virq_handle_t vm_virq_new(vm_t *vm, int virq, void (*ack)(void *), void *token)
     vgic = vgic_device_get_vgic(vgic_device);
     assert(vgic);
 
-    virq_data = malloc(sizeof(*virq_data));
-    if (!virq_data) {
-        return NULL;
-    }
-    virq_data->virq = virq;
-    virq_data->token = token;
-    virq_data->ack = ack;
-    virq_data->vm = vm;
-    err = virq_add(vgic, virq_data);
-    if (err) {
-        free(virq_data);
-        return NULL;
+    if (virq < 32) { // TODO fix constant
+        return virq_new_sgi_ppi(vm, vgic, vcpu_idx, virq, ack, token);
+    } else {
+        virq_data = malloc(sizeof(*virq_data));
+        if (!virq_data) {
+            return NULL;
+        }
+        virq_init(virq_data, vm, virq, ack, token);
+        err = virq_add(vgic, virq_data);
+        if (err) {
+            free(virq_data);
+            return NULL;
+        }
     }
     return virq_data;
+}
+
+static inline virq_handle_t virq_get_sgi_ppi(vgic_t *vgic, seL4_Word vcpu_idx, int irq)
+{
+    assert(vcpu_idx < CONFIG_MAX_NUM_NODES);
+    return vgic->vsgi_vppi[vcpu_idx][irq];
+}
+
+virq_handle_t vm_virq_new(vm_t *vm, int virq, void (*ack)(void *), void *token)
+{
+    ZF_LOGF_IF(virq < 32, "Use vm_virq_new_ppi_sgi"); // todo unfuck
+    return virq_new(vm, virq, ack, token, 0);
+}
+
+virq_handle_t vm_virq_new_vcpu(vm_t *vm, seL4_Word vcpu_idx, int virq, void (*ack)(void *), void *token)
+{
+    return virq_new(vm, virq, ack, token, vcpu_idx);
 }
