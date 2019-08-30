@@ -75,10 +75,14 @@ static inline int virq_add(vgic_t *vgic, struct virq_handle *virq_data)
 {
     int i;
     for (i = 0; i < MAX_VIRQS; i++) {
-        if (vgic->virqs[i] == NULL) {
+       if (vgic->virqs[i] == NULL) {
             vgic->virqs[i] = virq_data;
             return 0;
+       } else if (vgic->virqs[i]->virq == virq_data->virq) {
+            ZF_LOGE("Virq %d already registered\n", vgic->virqs[i]->virq);
+            return -1;
         }
+
     }
     return -1;
 }
