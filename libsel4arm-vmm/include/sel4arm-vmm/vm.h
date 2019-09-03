@@ -263,3 +263,14 @@ int vm_register_reboot_callback(vm_t *vm, reboot_hook_fn hook, void *token);
  *            after failing callback will not be called.
  */
 int vm_process_reboot_callbacks(vm_t *vm);
+
+/* helpers */
+static inline seL4_CPtr vm_get_tcb(vm_t *vm, int cpu_idx)
+{
+    return vm->vcpus[cpu_idx].tcb.cptr;
+}
+
+static inline seL4_CPtr vm_get_vcpu(vm_t *vm, int cpu_idx)
+{
+    return vm->vcpus[cpu_idx].vcpu.cptr;
+}
