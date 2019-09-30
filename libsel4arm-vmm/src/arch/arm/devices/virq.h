@@ -89,18 +89,18 @@ static inline int virq_add(vgic_t *vgic, struct virq_handle *virq_data)
 
 static inline int vgic_lr_has_virq(vgic_t *vgic, int vcpu_idx, struct virq_handle *virq)
 {
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < 4; i++) {
         if (vgic->irq[vcpu_idx][i] == NULL) {
-            return false;
+            return -1;
         }
         if (vgic->irq[vcpu_idx][i] == virq) {
-            return true;
+            return i;
         }
         if (vgic->irq[vcpu_idx][i]->virq == virq->virq) {
-            return true;
+            return i;
         }
     }
-    return false;
+    return -1;
 }
 
 static inline int vgic_find_free_irq(vgic_t *vgic, int vcpu) {
@@ -123,9 +123,17 @@ static inline int vgic_add_overflow_cpu(lr_of_t *lr_overflow, struct virq_handle
     /* Add to overflow list */
     int idx = lr_overflow->tail;
     if (unlikely(lr_overflow->full)) {
-        ZF_LOGE("too many overflow irqs");
+        ZF_LOGF("too many overflow irqs");
         return -1;
     }
+
+    /* avoid adding duplicate overflows */
+    for (size_t i = lr_overflow->head; i != lr_overflow->tail; i = LR_OF_NEXT(i)) {
+        if (lr_overflow->irqs[i].virq == irq->virq) {
+            return -2;
+        }
+    }
+
     lr_overflow->irqs[idx] = *irq;
     lr_overflow->full = (lr_overflow->head == LR_OF_NEXT(lr_overflow->tail));
     if (!lr_overflow->full) {
@@ -141,7 +149,7 @@ static inline int vgic_add_overflow(vgic_t *vgic, struct virq_handle *irq, seL4_
     return vgic_add_overflow_cpu(&vgic->lr_overflow[vcpu_idx], irq);
 }
 
-int vgic_vcpu_inject_irq(vgic_t *vgic, seL4_CPtr vcpu, struct virq_handle *irq, seL4_Word vcpu_idx);
+int vgic_vcpu_inject_irq(vgic_t *vgic, seL4_CPtr vcpu, struct virq_handle *irq, seL4_Word vcpu_idx, bool masked);
 
 /* Check the overflow list for pending IRQs */
 static inline int vgic_handle_overflow_cpu(vgic_t *vgic, lr_of_t *lr_overflow, seL4_CPtr vcpu,
@@ -151,9 +159,9 @@ static inline int vgic_handle_overflow_cpu(vgic_t *vgic, lr_of_t *lr_overflow, s
      * not want to process any new overflow irqs */
     size_t tail = lr_overflow->tail;
     for (size_t i = lr_overflow->head; i != tail; i = LR_OF_NEXT(i)) {
-        if (vgic_vcpu_inject_irq(vgic, vcpu, &lr_overflow->irqs[i], vcpu_idx) == 0) {
+        if (vgic_vcpu_inject_irq(vgic, vcpu, &lr_overflow->irqs[i], vcpu_idx, false) == 0) {
             lr_overflow->head = LR_OF_NEXT(i);
-            lr_overflow->full = (lr_overflow->head == LR_OF_NEXT(lr_overflow->tail));
+            lr_overflow->full = 0;//(lr_overflow->head == LR_OF_NEXT(lr_overflow->tail));
         } else {
             break;
         }
@@ -165,9 +173,6 @@ static inline int vgic_handle_overflow(vgic_t *vgic, seL4_CPtr vcpu_cptr, seL4_W
 {
     assert(vcpu_id < CONFIG_MAX_NUM_NODES);
     assert(vcpu_id >= 0);
-    if (vgic->lr_overflow[vcpu_id].head != vgic->lr_overflow[vcpu_id].tail) {
-        printf("%lu Handling overflow\n", vcpu_id);
-    }
     return vgic_handle_overflow_cpu(vgic, &vgic->lr_overflow[vcpu_id], vcpu_cptr, vcpu_id);
 }
 
@@ -242,9 +247,4 @@ virq_handle_t vm_virq_new(vm_t *vm, int virq, void (*ack)(void *), void *token)
 {
     ZF_LOGF_IF(virq < 32, "Use vm_virq_new_ppi_sgi"); // todo unfuck
     return virq_new(vm, virq, ack, token, 0);
-}
-
-virq_handle_t vm_virq_new_vcpu(vm_t *vm, seL4_Word vcpu_idx, int virq, void (*ack)(void *), void *token)
-{
-    return virq_new(vm, virq, ack, token, vcpu_idx);
 }

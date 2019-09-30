@@ -37,15 +37,16 @@ static int generic_map_page(vka_t *vka, vspace_t *vmm_vspace, vspace_t *vm_vspac
     vka_object_t frame_obj;
     cspacepath_t frame[2];
     int err;
+    size_t size_bits = 12;
 
     /* No vspace supplied, We have already succeeded */
     if (vmm_vspace == NULL && vm_vspace == NULL) {
         return 0;
     }
-    assert(size == 0x1000);
+    assert(size == BIT(size_bits));
 
     /* Create a frame */
-    err = vka_alloc_frame(vka, 12, &frame_obj);
+    err = vka_alloc_frame(vka, size_bits, &frame_obj);
     assert(!err);
     if (err) {
         return -1;
@@ -87,7 +88,7 @@ static int generic_map_page(vka_t *vka, vspace_t *vmm_vspace, vspace_t *vm_vspac
             vka_free_object(vka, &frame_obj);
             return -1;
         }
-        err = vspace_map_pages_at_vaddr(vm_vspace, &cap, NULL, addr, 1, 12, res);
+        err = vspace_map_pages_at_vaddr(vm_vspace, &cap, &size_bits, addr, 1, size_bits, res);
         vspace_free_reservation(vm_vspace, res);
         assert(!err);
         if (err) {
@@ -106,11 +107,11 @@ static int generic_map_page(vka_t *vka, vspace_t *vmm_vspace, vspace_t *vm_vspac
         void *addr;
         seL4_CapRights_t rights = seL4_AllRights;
         seL4_CPtr cap = frame[1].capPtr;
-        addr = vspace_map_pages(vmm_vspace, &cap, NULL, rights, 1, 12, cached);
+        addr = vspace_map_pages(vmm_vspace, &cap, &size_bits, rights, 1, size_bits, cached);
         if (addr == NULL) {
             printf("Failed to provide memory\n");
             if (vm_vspace) {
-                vspace_unmap_pages(vm_vspace, (void *)ipa, 1, 12, vka);
+                vspace_unmap_pages(vm_vspace, (void *)ipa, 1, size_bits, vka);
                 vka_cspace_free(vka, frame[1].capPtr);
             }
             vka_free_object(vka, &frame_obj);
@@ -129,9 +130,13 @@ void *map_device(vspace_t *vspace, vka_t *vka, simple_t *simple, uintptr_t paddr
     cspacepath_t frame;
     void *vaddr;
     int err;
+    int cache = 0;
 
     paddr &= ~0xfff;
     vaddr = (void *)(_vaddr &= ~0xfff);
+
+    if (paddr > 0x100000000) cache = 1;
+    size_t size_bits = 12;
 
     /* Alocate a slot */
     err = vka_cspace_alloc_path(vka, &frame);
@@ -143,9 +148,9 @@ void *map_device(vspace_t *vspace, vka_t *vka, simple_t *simple, uintptr_t paddr
 
     /* Find the device cap */
     seL4_Word cookie;
-    err = vka_utspace_alloc_at(vka, &frame, kobject_get_type(KOBJECT_FRAME, 12), 12, paddr, &cookie);
+    err = vka_utspace_alloc_at(vka, &frame, kobject_get_type(KOBJECT_FRAME, size_bits), size_bits, paddr, &cookie);
     if (err) {
-        err = simple_get_frame_cap(simple, (void *)paddr, 12, &frame);
+        err = simple_get_frame_cap(simple, (void *)paddr, size_bits, &frame);
         if (err) {
             printf("Failed to find device cap for 0x%x\n", (uint32_t)paddr);
             //vka_cspace_free(vka, frame.capPtr);
@@ -155,7 +160,7 @@ void *map_device(vspace_t *vspace, vka_t *vka, simple_t *simple, uintptr_t paddr
     /* Map the device */
     if (vaddr) {
         reservation_t res;
-        res = vspace_reserve_range_at(vspace, vaddr, 0x1000, rights, 0);
+        res = vspace_reserve_range_at(vspace, vaddr, BIT(size_bits), rights, cache);
         assert(res.res);
         if (!res.res) {
             printf("Failed to reserve vspace\n");
@@ -163,11 +168,11 @@ void *map_device(vspace_t *vspace, vka_t *vka, simple_t *simple, uintptr_t paddr
             return NULL;
         }
         /* Map in the page */
-        err = vspace_map_pages_at_vaddr(vspace, &frame.capPtr, NULL, vaddr,
-                                        1, 12, res);
+        err = vspace_map_pages_at_vaddr(vspace, &frame.capPtr, &size_bits, vaddr,
+                                        1, size_bits, res);
         vspace_free_reservation(vspace, res);
     } else {
-        vaddr = vspace_map_pages(vspace, &frame.capPtr, NULL, rights, 1, 12, 0);
+        vaddr = vspace_map_pages(vspace, &frame.capPtr, &size_bits, rights, 1, size_bits, cache);
         err = (vaddr == 0);
     }
     assert(!err);
@@ -225,16 +230,27 @@ void *map_emulated_device(vm_t *vm, const struct device *d)
     }
 
     /* Map the frame to the VM */
-    DMAP("Mapping emulated device ipa0x%x\n", (uint32_t)vm_addr);
+    printf("Mapping emulated device ipa%p\n", vm_addr);
 
-    seL4_CapRights_t rights = seL4_CanRead;
+//    seL4_CapRights_t rights = seL4_CanRead;
+    seL4_CapRights_t rights = seL4_NoRights;
     res = vspace_reserve_range_at(vm_vspace, vm_addr, size, rights, 0);
     ZF_LOGF_IF(!res.res, "Failed to reserve range");
-    err = vspace_map_pages_at_vaddr(vm_vspace, vm_frames, NULL, vm_addr,
+    err = vspace_map_pages_at_vaddr(vm_vspace, vm_frames, &frame_size, vm_addr,
                                     n_frames, frame_size, res);
     vspace_free_reservation(vm_vspace, res);
-    vmm_addr = vspace_map_pages(vmm_vspace, vmm_frames, NULL, seL4_AllRights,
+    vmm_addr = vspace_map_pages(vmm_vspace, vmm_frames, &frame_size, seL4_AllRights,
                                 n_frames, frame_size, 0);
+
+    /* Now flush the range (bug in seL4 which triggers on the sdm845 -
+     * the memzero on the allocated frame written by seL4 does not write out to RAM unless
+     * we force a flush */
+    for (uintptr_t addr = (uintptr_t) vmm_addr; addr < ((uintptr_t) vmm_addr) + size; addr += BIT(frame_size)) {
+        err = seL4_ARM_VSpace_CleanInvalidate_Data(vspace_get_root(vm->vmm_vspace), addr, addr + BIT(frame_size));
+        assert(err == seL4_NoError);
+    }
+
+    printf("Mapped it VMM at %p\n", vmm_addr);
     assert(vmm_addr);
     if (vmm_addr == NULL) {
         return NULL;
@@ -245,30 +261,38 @@ void *map_emulated_device(vm_t *vm, const struct device *d)
     return vmm_addr;
 }
 
-void *map_ram(vspace_t *vspace, vspace_t *vmm_vspace, vka_t *vka, uintptr_t vaddr)
+void *map_ram(vspace_t *vspace, vspace_t *vmm_vspace, vka_t *vka, uintptr_t vaddr, size_t size_bits)
 {
     vka_object_t frame_obj;
     cspacepath_t frame[2];
 
     reservation_t res;
-    void *addr;
     int err;
 
-    addr = (void *)(vaddr & ~0xfff);
+    uintptr_t addr = (vaddr & ~MASK(size_bits));
+    assert(addr == vaddr);
 
     /* reserve vspace */
-    res = vspace_reserve_range_at(vspace, addr, 0x1000, seL4_AllRights, 1);
+    res = vspace_reserve_range_at(vspace, (void *) addr, BIT(size_bits), seL4_AllRights, 1);
     if (!res.res) {
         ZF_LOGF("Failed to reserve range");
         return NULL;
     }
 
-    /* Create a frame */
-    err = vka_alloc_frame_maybe_device(vka, 12, true, &frame_obj);
+
+    /* first try a 1-1 mapping with device memory -- TODO we should probably
+     * just customise this ? Or let camkes do it ...
+     */
+    err = vka_alloc_frame_at(vka, size_bits, addr, &frame_obj);
     if (err) {
-        ZF_LOGF("Failed vka_alloc_frame_maybe_device");
-        vspace_free_reservation(vspace, res);
-        return NULL;
+        assert(0);
+        /* try normal memory */
+        err = vka_alloc_frame_maybe_device(vka, size_bits, true, &frame_obj);
+        if (err) {
+            ZF_LOGF("Failed vka_alloc_frame_maybe_device");
+            vspace_free_reservation(vspace, res);
+            return NULL;
+        }
     }
 
     vka_cspace_make_path(vka, frame_obj.cptr, &frame[0]);
@@ -292,7 +316,9 @@ void *map_ram(vspace_t *vspace, vspace_t *vmm_vspace, vka_t *vka, uintptr_t vadd
 
 
     /* Map in the frame */
-    err = vspace_map_pages_at_vaddr(vspace, &frame[0].capPtr, NULL, addr, 1, 12, res);
+//    printf("VM %p: Mapped %p <--> %p\n", vspace, addr, addr + BIT(size_bits));
+    assert(addr > 0x15000000);
+    err = vspace_map_pages_at_vaddr(vspace, &frame[0].capPtr, &size_bits, (void *) addr, 1, size_bits, res);
     vspace_free_reservation(vspace, res);
     if (err) {
         ZF_LOGF("Failed vspace_map_pages_at_vaddr");
@@ -302,27 +328,30 @@ void *map_ram(vspace_t *vspace, vspace_t *vmm_vspace, vka_t *vka, uintptr_t vadd
     }
 
     /* Map into the vspace of the VMM to zero memory */
+#if 0
     void *vmm_addr;
     seL4_CapRights_t rights = seL4_AllRights;
     seL4_CPtr cap = frame[1].capPtr;
-    vmm_addr = vspace_map_pages(vmm_vspace, &cap, NULL, rights, 1, 12, true);
+    printf("%p Mapping into vmm\n", vmm_vspace);
+    vmm_addr = vspace_map_pages(vmm_vspace, &cap, NULL, rights, 1, size_bits, true);
     if (vmm_addr == NULL) {
         ZF_LOGF("Failed vspace_map_pages");
-        vspace_unmap_pages(vspace, (void *)addr, 1, 12, vka);
+        vspace_unmap_pages(vspace, (void *)addr, 1, size_bits, vka);
         vka_cspace_free(vka, frame[1].capPtr);
         vka_free_object(vka, &frame_obj);
         return NULL;
     }
-    memset(vmm_addr, 0, PAGE_SIZE_4K);
+    //memset(vmm_addr, 0, BIT(size_bits)); --> TODO zeroing the memory does not work
+    //should be passed as an attribute
     /* This also frees the cspace slot we made.  */
-    vspace_unmap_pages(vmm_vspace, (void *)vmm_addr, 1, 12, vka);
-
-    return addr;
+    vspace_unmap_pages(vmm_vspace, (void *)vmm_addr, 1, size_bits, vka);
+#endif
+    return (void *) addr;
 }
 
-void *map_vm_ram(vm_t *vm, uintptr_t vaddr)
+void *map_vm_ram(vm_t *vm, uintptr_t vaddr, size_t size_bits)
 {
-    return map_ram(vm_get_vspace(vm), vm->vmm_vspace, vm->vka, vaddr);
+    return map_ram(vm_get_vspace(vm), vm->vmm_vspace, vm->vka, vaddr, size_bits);
 }
 
 void *map_shared_page(vm_t *vm, uintptr_t ipa, seL4_CapRights_t rights)
@@ -339,13 +368,19 @@ int vm_install_ram_only_device(vm_t *vm, const struct device *device)
     uintptr_t paddr;
     int err;
     d = *device;
-    for (paddr = d.pstart; paddr - d.pstart < d.size; paddr += 0x1000) {
+
+    size_t size_bits = 21;
+
+    for (paddr = d.pstart; paddr - d.pstart < d.size; paddr += BIT(size_bits)) {
+        assert((paddr & MASK(size_bits - 1)) == 0);
         void *addr;
-        addr = map_vm_ram(vm, paddr);
+        addr = map_vm_ram(vm, paddr, size_bits);
         if (!addr) {
             return -1;
         }
+
     }
+    printf("Mapped ram from %p <--> %p\n", (void *) d.pstart, (void *) (d.pstart + d.size));
     err = vm_add_device(vm, &d);
     assert(!err);
     return err;
@@ -394,7 +429,7 @@ int vm_map_frame(vm_t *vm, seL4_CPtr cap, uintptr_t ipa, size_t size_bits, int c
     if (!res.res) {
         return -1;
     }
-    err = vspace_map_pages_at_vaddr(vm_vspace, &cap, NULL, addr, 1, size_bits, res); //  NULL = cookies 1 = num caps
+    err = vspace_map_pages_at_vaddr(vm_vspace, &cap, &size_bits, addr, 1, size_bits, res); //  NULL = cookies 1 = num caps
     vspace_free_reservation(vm_vspace, res);
     if (err) {
         printf("Failed to provide memory\n");

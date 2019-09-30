@@ -105,7 +105,7 @@ static int copy_out_page(vspace_t *dst_vspace, vspace_t *src_vspace, vka_t *vka,
     }
     memcpy(tmp_dst + offset, src, copy_size);
 #if defined(CONFIG_ARCH_ARM) && !defined(CONFIG_PLAT_EXYNOS5)
-    int error = seL4_ARM_Page_CleanInvalidate_Data(dup_cap, 0, PAGE_SIZE_4K);
+    int error = seL4_ARM_Page_CleanInvalidate_Data(dup_cap, 0, BIT(bits));
     ZF_LOGF_IFERR(error, "seL4_ARM_Page_CleanInvalidate_Data failed");
 #endif
 

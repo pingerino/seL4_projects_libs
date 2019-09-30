@@ -217,9 +217,13 @@ virq_handle_t vm_virq_vcpu_new(vm_t *vm, seL4_Word vcpu_idx, int irq, void (*ack
  * Inject an IRQ into a VM
  * @param[in] virq  A handle to the virtual IRQ
  * @param[in] vcpu_idx  The vpu identifier for which vcpu to inject the irq into.
+ * @param[in] masked    if true, do not inject the virq into LRs, just add to the overflow
+ *                      to be injected when the next maintenance event occurs.
+ *
+ *  The vpu identifier for which vcpu to inject the irq into.
  * @return          0 on success
  */
-int vm_inject_IRQ(virq_handle_t virq, seL4_Word vcpu_idx);
+int vm_inject_IRQ(virq_handle_t virq, seL4_Word vcpu_idx, bool masked);
 
 /**
  * Install a service into the VM

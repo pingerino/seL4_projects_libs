@@ -492,9 +492,11 @@ seL4_Word fault_get_data_mask(fault_t *f)
         assert(!(addr & 0x1));
         break;
     case WIDTH_WORD:
-    case WIDTH_DOUBLEWORD:
         mask = 0xffffffff;
         assert(!(addr & 0x3));
+        break;
+    case WIDTH_DOUBLEWORD:
+        mask = 0xffffffffffffffff;
         break;
     default:
         /* Should never get here... Keep the compiler happy */

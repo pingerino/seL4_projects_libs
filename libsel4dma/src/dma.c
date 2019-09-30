@@ -34,6 +34,8 @@
 #define DMA_MINALIGN_BYTES 32
 #elif defined(CONFIG_PLAT_EXYNOS5)
 #define DMA_MINALIGN_BYTES 32
+#elif defined(CONFIG_PLAT_SDM845)
+#define DMA_MINALIGN_BYTES 64
 #else
 #warning Unknown platform. DMA alignment defaulting to 32 bytes.
 #define DMA_MINALIGN_BYTES 32

@@ -48,6 +48,8 @@ enum gic_dist_action {
     ACTION_PENDING_SET,
     ACTION_PENDING_CLR,
     ACTION_SGI,
+    ACTION_ROUTE,
+    ACTION_SET_TRIGGER,
     ACTION_UNKNOWN
 };
 
@@ -79,7 +81,7 @@ static inline enum gic_dist_action gic_dist_get_action(int offset)
     } else if (0x800 <= offset && offset < 0x8FC) { /* targets         */
         return ACTION_READONLY;
     } else if (0xC00 <= offset && offset < 0xD00) { /* config          */
-        return ACTION_READONLY;
+        return ACTION_SET_TRIGGER;
     } else if (0xD00 <= offset && offset < 0xD80) { /* spi config      */
         return ACTION_READONLY;
     } else if (0xDD4 <= offset && offset < 0xDD8) { /* legacy_int      */
@@ -92,6 +94,8 @@ static inline enum gic_dist_action gic_dist_get_action(int offset)
         return ACTION_PASSTHROUGH;
     } else if (0xF10 <= offset && offset < 0xF10) { /* sgi_pending_clr */
         return ACTION_SGI;
+    } else if (0x6100 <= offset && offset < 0x7fe0) { /* irouter (gicv3 only) */
+        return ACTION_ROUTE;
     } else {
         return ACTION_READONLY;
     }
@@ -174,14 +178,14 @@ static inline int vgic_dist_enable_irq(vgic_t *vgic, struct gic_dist_map *gic_di
 static inline int vgic_dist_disable_irq(struct gic_dist_map *gic_dist, int irq)
 {
     /* STATE g) */
-    if (irq >= 16) {
+    if (irq >= 32) {
         DDIST("disabling irq %d\n", irq);
         set_enable(gic_dist, irq, false);
     }
     return 0;
 }
 
-static inline int vgic_dist_set_pending_irq(vgic_t *vgic, seL4_CPtr vcpu, int irq, seL4_Word vcpu_idx)
+static inline int vgic_dist_set_pending_irq(vgic_t *vgic, seL4_CPtr vcpu, int irq, seL4_Word vcpu_idx, bool masked)
 {
 #ifdef CONFIG_LIB_SEL4_ARM_VMM_VCHAN_SUPPORT
     vm->lock();
@@ -195,8 +199,7 @@ static inline int vgic_dist_set_pending_irq(vgic_t *vgic, seL4_CPtr vcpu, int ir
         DDIST("Pending set: Inject IRQ from pending set (%d)\n", irq);
 
         vgic_dist_set_pending(gic_dist, virq_data->virq, true);
-        int err = vgic_vcpu_inject_irq(vgic, vcpu, virq_data, vcpu_idx);
-        assert(!err);
+        int err = vgic_vcpu_inject_irq(vgic, vcpu, virq_data, vcpu_idx, masked);
 
 #ifdef CONFIG_LIB_SEL4_ARM_VMM_VCHAN_SUPPORT
         vm->unlock();
@@ -221,16 +224,42 @@ static inline int vgic_dist_clr_pending_irq(struct gic_dist_map *gic_dist, int i
     return 0;
 }
 
+extern void enable_irq(int irq);
+extern void disable_irq(int irq);
+extern void set_trigger(int irq, int trigger);
+
 static inline int handle_vgic_dist_fault(struct device *d, vm_t *vm, fault_t *fault)
 {
     vgic_t *vgic = vgic_device_get_vgic(d);
     struct gic_dist_map *gic_dist = priv_get_dist(vgic->registers);
-    uint32_t mask = fault_get_data_mask(fault);
+    seL4_Word mask = fault_get_data_mask(fault);
     int offset = fault_get_address(fault) - d->pstart;
 
-    offset = ALIGN_DOWN(offset, sizeof(uint32_t));
-    uint32_t *reg = (uint32_t *)((uintptr_t)gic_dist + offset + (offset - (offset % 4)));
-    enum gic_dist_action act = gic_dist_get_action(offset);
+    uint8_t *reg8 = 0;
+    uint16_t *reg16 = 0;
+    uint32_t *reg32 = 0;
+    uint64_t *reg64 = 0;
+    uint64_t data;
+
+    /* this is the exact address that the guest was attempting
+     * to access */
+    uintptr_t reg_addr = ((uintptr_t) gic_dist + offset);
+    switch (fault_get_width(fault)) {
+    case WIDTH_BYTE:
+        reg8 = (uint8_t *) reg_addr;
+        break;
+    case WIDTH_HALFWORD:
+        reg16 = (uint16_t *) reg_addr;
+        break;
+    case WIDTH_WORD:
+        reg32 = (uint32_t *) reg_addr;
+        break;
+    case WIDTH_DOUBLEWORD:
+        reg64 = (uint64_t *) reg_addr;
+        break;
+    default:
+        ZF_LOGF("invalid fault width %d!!", fault_get_width(fault));
+    }
 
     /* Out of range */
     if (offset < 0 || offset >= sizeof(struct gic_dist_map)) {
@@ -239,100 +268,149 @@ static inline int handle_vgic_dist_fault(struct device *d, vm_t *vm, fault_t *fa
 
         /* Read fault */
     } else if (fault_is_read(fault)) {
-        fault_set_data(fault, *reg);
+        assert(0); // reads not trapped
+        switch (fault_get_width(fault)) {
+        case WIDTH_BYTE:
+            data = *reg8;
+            break;
+        case WIDTH_HALFWORD:
+            data = *reg16;
+            break;
+        case WIDTH_WORD:
+            data = *reg32;
+            break;
+        case WIDTH_DOUBLEWORD:
+            data = *reg64;
+            break;
+        }
+        fault_set_data(fault, data);
+        //printf("0x%lx DDIST: reading 0x%x as 0x%lx 0x%lx\n", fault_get_ctx(fault)->pc, offset, fault_get_data(fault), mask);
         return advance_fault(fault);
     } else {
-        uint32_t data;
+        seL4_Word data = fault_get_data(fault) & fault_get_data_mask(fault);
+        enum gic_dist_action act = gic_dist_get_action(offset);
+
         switch (act) {
         case ACTION_READONLY:
-            *reg = fault_emulate(fault, *reg);
-            data = fault_get_data(fault);
-            DDIST("%lu: Readonly write on offset 0x%x --> 0x%x\n", fault->vcpu_idx, offset, data);
-            return ignore_fault(fault);
+            assert(fault_get_width(fault) == WIDTH_WORD);
+           //printf("%lu: Readonly write on offset 0x%x / width %x --> 0x%lx/0x%x\n", fault->vcpu_idx, offset, fault_get_width(fault), fault_get_data(fault), *reg32);
+            *reg32 = data;
+           return ignore_fault(fault);
 
         case ACTION_PASSTHROUGH:
-            *reg = fault_emulate(fault, *reg);
-            return advance_fault(fault);
-
+           assert(fault_get_width(fault) == WIDTH_WORD);
+           *reg32 = data;
+           return ignore_fault(fault);
         case ACTION_ENABLE:
-            *reg = fault_emulate(fault, *reg);
-            data = fault_get_data(fault);
-            if (data == GIC_ENABLED) {
+            if (data & GIC_ENABLED) {
                 vgic_dist_enable(gic_dist);
-            } else if (data == 0) {
-                vgic_dist_disable(gic_dist);
             } else {
-                ZF_LOGF("Unknown enable register encoding\n");
+                vgic_dist_disable(gic_dist);
             }
-            return advance_fault(fault);
-
-        case ACTION_ENABLE_SET:
-            data = fault_get_data(fault);
-            /* Mask the data to write */
-            data &= mask;
+            *reg32 = data & 0b10011;
+            return ignore_fault(fault);
+        case ACTION_ENABLE_SET: {
             /* Mask bits that are already set */
-            data &= ~(*reg);
-            while (data) {
-                int irq = CTZ(data);
-                data &= ~(1U << irq);
+            uint32_t enable = data & ~(*reg32);
+            while (enable) {
+                int irq = CTZ(enable);
+                enable &= ~(1U << irq);
                 irq += (offset - 0x100) * 8;
                 vgic_dist_enable_irq(vgic, gic_dist, irq);
-           }
-            return ignore_fault(fault);
+                enable_irq(irq);
 
-        case ACTION_ENABLE_CLR:
-            data = fault_get_data(fault);
-            /* Mask the data to write */
-            data &= mask;
+           }
+           *reg32 |= data;
+           return ignore_fault(fault);
+        }
+        case ACTION_ENABLE_CLR: {
             /* Mask bits that are already clear */
-            data &= *reg;
-            while (data) {
-                int irq = CTZ(data);
-                data &= ~(1U << irq);
+            uint32_t clear = data & (*reg32);
+            while (clear) {
+                int irq = CTZ(clear);
+                clear &= ~(1U << irq);
                 irq += (offset - 0x180) * 8;
                 vgic_dist_disable_irq(gic_dist, irq);
+                disable_irq(irq);
             }
+            *reg32 |= data;
             return ignore_fault(fault);
-        case ACTION_PENDING_SET:
-            data = fault_get_data(fault);
+        }
+        case ACTION_PENDING_SET: {
             /* Mask the data to write */
-            data &= mask;
             /* Mask bits that are already set */
-            data &= ~(*reg);
-            while (data) {
-                int irq = CTZ(data);
-                data &= ~(1U << irq);
+            uint32_t ps = data & ~(*reg32);
+            while (ps) {
+                int irq = CTZ(ps);
+                ps &= ~(1U << irq);
                 irq += (offset - 0x200) * 8;
                 vgic_dist_set_pending_irq(vgic, vm_get_vcpu(vm, fault->vcpu_idx), irq,
-                        fault->vcpu_idx);
+                        fault->vcpu_idx, false);
             }
             return ignore_fault(fault);
-
-        case ACTION_PENDING_CLR:
-            data = fault_get_data(fault);
-            /* Mask the data to write */
-            data &= mask;
+        }
+        case ACTION_PENDING_CLR: {
             /* Mask bits that are already clear */
-            data &= *reg;
-            while (data) {
-                int irq = CTZ(data);
-                data &= ~(1U << irq);
+            uint32_t pc = data & *reg32;
+            while (pc) {
+                int irq = CTZ(pc);
+                pc &= ~(1U << irq);
                 irq += (offset - 0x280) * 8;
                 vgic_dist_clr_pending_irq(gic_dist, irq);
             }
             return ignore_fault(fault);
-
+        }
         case ACTION_SGI:
             ZF_LOGF("vgic SGI not implemented!\n");
              return ignore_fault(fault);
-
+        case ACTION_ROUTE: {
+             uint64_t route = data;
+             int irq = (offset - 0x6000) / sizeof(uint64_t);
+             // TODO implement
+             if (route  != 0) {
+                printf("Attempted to route irq %d to %p\n", irq, (void *) route);
+             }
+             break;
+        }
+        case ACTION_SET_TRIGGER: {
+            assert(fault_get_width(fault) == WIDTH_WORD);
+            /* Mask bits that are already set */
+            uint32_t config = data & ~(*reg32);
+            while (config) {
+                /* get which icfgr register is being modified */
+                int n = (offset - 0xC00) / sizeof(uint32_t);
+                /* each 32 bit icfgr<n> register covers 16 irqs */
+                n = n * 16;
+                for (int i = 0; i < 16; i++) {
+                    int irq = i + n;
+                    set_trigger(irq, (config & 0x3) &0x1);
+                    config = config >> 2;
+                }
+            }
+            break;
+        }
         case ACTION_UNKNOWN:
         default:
-            *reg = fault_emulate(fault, *reg);
-            data = fault_get_data(fault);
-            DDIST("%lu: Unknown write on offset 0x%x -> 0x%x\n", fault->vcpu_idx, offset, data);
-            return ignore_fault(fault);
+            assert(0);
+  //          printf("%lu: Unknown write on offset 0x%x -> 0x%lx\n", fault->vcpu_idx, offset, data);
         }
+
+        int shift = 8 * (offset % 4);
+        switch (fault_get_width(fault)) {
+        case WIDTH_BYTE:
+            *((uint8_t *) reg_addr) = data >> shift;
+            break;
+        case WIDTH_HALFWORD:
+            *((uint16_t *) reg_addr) = data >> shift;
+            break;
+        case WIDTH_WORD:
+            *((uint32_t *) reg_addr) = data;
+            break;
+        case WIDTH_DOUBLEWORD:
+            *((uint64_t *) reg_addr) = data;
+            break;
+        }
+        return ignore_fault(fault);
     }
     abandon_fault(fault);
     return -1;

@@ -1,3 +1,4 @@
+#define ZF_LOG_LEVEL ZF_LOG_ERROR
 /*
  * Copyright 2017, Data61
  * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
@@ -137,12 +138,10 @@ static enum gic_dist_action gic_sgi_get_action(int offset)
     return ACTION_UNKNOWN;
 }
 
-static int vgic_sgi_enable_irq(struct device *d, vm_t *vm, int irq, seL4_Word vcpu_idx)
+static int vgic_sgi_enable_irq(struct gic_rdist_sgi_ppi_map *gic_sgi, vgic_t *vgic, int irq, seL4_Word vcpu_idx)
 {
-    struct gic_rdist_sgi_ppi_map *gic_sgi = vgic_priv_get_rdist_sgi(d, vcpu_idx);
-    vgic_t *vgic = vgic_device_get_vgic(d);
     if (irq < GIC_SPI_IRQ_MIN) {
-        DDIST("sgi enabling irq %d\n", irq);
+        DDIST("\nsgi enabling irq %d\n", irq);
         sgi_set_enable(gic_sgi, irq, true);
         struct virq_handle *virq_data = virq_get_sgi_ppi(vgic, vcpu_idx, irq);
         if (virq_data) {
@@ -158,10 +157,9 @@ static int vgic_sgi_enable_irq(struct device *d, vm_t *vm, int irq, seL4_Word vc
     return 0;
 }
 
-static int vgic_sgi_disable_irq(struct device *d, vm_t *vm, int irq, seL4_Word vcpu_idx)
+static int vgic_sgi_disable_irq(struct gic_rdist_sgi_ppi_map *gic_sgi, int irq)
 {
     /* STATE g) */
-    struct gic_rdist_sgi_ppi_map *gic_sgi = vgic_priv_get_rdist_sgi(d, vcpu_idx);
     if (irq < GIC_SPI_IRQ_MIN) {
         DDIST("sgi disabling irq %d\n", irq);
         sgi_set_enable(gic_sgi, irq, false);
@@ -169,7 +167,7 @@ static int vgic_sgi_disable_irq(struct device *d, vm_t *vm, int irq, seL4_Word v
     return 0;
 }
 
-static int vgic_sgi_set_pending_irq(struct device *d, vm_t *vm, int irq, seL4_Word vcpu_idx)
+static int vgic_sgi_set_pending_irq(struct device *d, vm_t *vm, int irq, seL4_Word vcpu_idx, bool masked)
 {
     /* STATE c) */
     struct gic_rdist_sgi_ppi_map *gic_sgi = vgic_priv_get_rdist_sgi(d, vcpu_idx);
@@ -180,10 +178,8 @@ static int vgic_sgi_set_pending_irq(struct device *d, vm_t *vm, int irq, seL4_Wo
     if (virq_data && gic_dist_is_enabled(gic_dist) && sgi_is_enabled(gic_sgi, irq)) {
         int err;
         sgi_set_pending(gic_sgi, virq_data->virq, true);
-        err = vgic_vcpu_inject_irq(vgic, vm_get_vcpu(vm, vcpu_idx), virq_data, vcpu_idx);
-        assert(!err);
-
-        return err;
+        return vgic_vcpu_inject_irq(vgic, vm_get_vcpu(vm, vcpu_idx), virq_data, vcpu_idx, masked);
+        //return 0;
     } else {
         /* No further action */
         DDIST("IRQ not enabled (%d) for %s\n", irq, vm->name);
@@ -192,108 +188,321 @@ static int vgic_sgi_set_pending_irq(struct device *d, vm_t *vm, int irq, seL4_Wo
     return 0;
 }
 
-static int handle_vgic_rdist_fault(struct device *d, vm_t *vm, fault_t *fault)
+// TODO THis shouild be in the general faulit code
+static bool is_valid_fault(fault_t *fault, uintptr_t reg)
 {
-    struct gic_rdist_map *gic_rdist = vgic_priv_get_rdist(d, fault->vcpu_idx);
-    int offset = fault_get_address(fault) - d->pstart;
-    uint32_t *reg = (uint32_t *)((uintptr_t)gic_rdist + (offset - (offset % 4)));
+    switch (fault_get_width(fault)) {
+    case WIDTH_BYTE:
+        return ((reg % sizeof(uint8_t)) == 0);
+    case WIDTH_HALFWORD:
+        return ((reg % sizeof(uint16_t)) == 0);
+    case WIDTH_WORD:
+        return ((reg % sizeof(uint32_t)) == 0);
+    case WIDTH_DOUBLEWORD:
+        return ((reg % sizeof(uint64_t)) == 0);
+    default:
+        return false;
+    }
+}
+
+static int handle_read(fault_t *fault, uintptr_t reg)
+{
+    assert(is_valid_fault(fault, reg));
+    switch (fault_get_width(fault)) {
+    case WIDTH_BYTE:
+        fault_set_data(fault, *((uint8_t *) reg));
+        break;
+    case WIDTH_HALFWORD:
+        fault_set_data(fault, *((uint16_t *) reg));
+        break;
+    case WIDTH_WORD:
+        fault_set_data(fault, *((uint32_t *) reg));
+        break;
+    case WIDTH_DOUBLEWORD:
+        fault_set_data(fault, *((uint64_t *) reg));
+        break;
+    }
+
+    return advance_fault(fault);
+
+}
+
+static void emulate_write(fault_t *fault, uintptr_t reg, int offset)
+{
+    uintptr_t data = fault_get_data(fault) & fault_get_data_mask(fault);
+    int shift = 8 * (offset % sizeof(uint32_t));
+    // TODO this is just fault emulate ??
+    switch (fault_get_width(fault)) {
+    case WIDTH_BYTE:
+        *((uint8_t *) reg) = data >> shift;
+        break;
+    case WIDTH_HALFWORD:
+        *((uint16_t *) reg) = data >> shift;
+        break;
+    case WIDTH_WORD:
+        *((uint32_t *) reg) = data;
+        break;
+    case WIDTH_DOUBLEWORD:
+        *((uint64_t *) reg) = data;
+        break;
+    }
+}
+
+static int handle_vgic_rdist_write(struct gic_rdist_map *gic_rdist, vgic_t *vgic, vm_t *vm, fault_t *fault,
+                                   uintptr_t reg, int offset)
+{
     enum gic_dist_action act = gic_rdist_get_action(offset);
 
-    /* Out of range */
-    if (offset < 0 || offset >= sizeof(struct gic_rdist_map)) {
-        DDIST("rdist offset out of range %d %zu\n", offset,(size_t) sizeof(struct gic_rdist_map));
+    switch (act) {
+    case ACTION_READONLY:
+        ZF_LOGW("RDIST %lu: ignoring fault on offset 0x%x --> 0x%lx\n", fault->vcpu_idx, offset, fault_get_data(fault));
+        emulate_write(fault, reg, offset);
         return ignore_fault(fault);
-    /* Read fault */
-    } else if (fault_is_read(fault)) {
-        DDIST("Rdist read at %x\n", offset);
-        fault_set_data(fault, *reg);
-        return advance_fault(fault);
-    } else {
-        switch (act) {
-        case ACTION_READONLY:
-            *reg = fault_emulate(fault, *reg);
-            uint32_t data = fault_get_data(fault);
-            DDIST("RDIST %lu: ignoring fault on offset 0x%x --> 0x%x\n", fault->vcpu_idx, offset, data);
-            return ignore_fault(fault);
-        case ACTION_UNKNOWN:
-        default:
-            *reg = fault_emulate(fault, *reg);
-            data = fault_get_data(fault);
-            DDIST("RDIST %lu: Unknown action on offset 0x%x --> 0x%x\n", fault->vcpu_idx, offset, data);
-            return ignore_fault(fault);
+    case ACTION_UNKNOWN:
+    default:
+        printf("RDIST: unknown fault at offset %d\n", offset);
+        return abandon_fault(fault);
+    }
+}
+
+static int handle_vgic_rdist_sgi_write(struct gic_rdist_sgi_ppi_map *gic_rdist_sgi,
+                                       vgic_t *vgic, vm_t *vm, fault_t *fault,
+                                       uintptr_t reg, int offset)
+{
+    enum gic_dist_action act = gic_sgi_get_action(offset);
+
+    /* most gicv3 regs are 32 bits - get a pointer to that  */
+    uint32_t *reg32 = (uint32_t *) ALIGN_DOWN(reg, sizeof(uint32_t));
+    uintptr_t data = fault_get_data(fault) & fault_get_data_mask(fault);
+
+    switch (act) {
+    case ACTION_READONLY:
+        ZF_LOGW("RDIST_SGI %lu: ignoring fault on offset 0x%x --> 0x%lx\n", fault->vcpu_idx, offset, data);
+        *reg32 = data;//emulate_write(fault, reg, offset);
+        return ignore_fault(fault);
+    case ACTION_ENABLE_SET: {
+        /* Mask bits that are already set */
+        // TODO this could be a 16 or 8 bit fault!?
+
+        uint32_t set = fault_get_data(fault) & ~(*reg32);
+        while (set) {
+            int irq = CTZ(set);
+            set &= ~(1U << irq);
+            irq += (offset - 0x100) * 8;
+            vgic_sgi_enable_irq(gic_rdist_sgi, vgic, irq, fault->vcpu_idx);
+            DDIST("Enabled IRQ %d\n", irq);
         }
+        assert(fault_get_width(fault) == WIDTH_WORD);
+        int i = (offset - 0x100) / sizeof(uint32_t);
+        gic_rdist_sgi->isenable[i] |= data;
+        *reg32 |= data;
+        assert(gic_rdist_sgi->isenable[i] == gic_rdist_sgi->icenable[i]);
+        return ignore_fault(fault);
+    }
+    case ACTION_ENABLE_CLR: {
+        /* Mask bits that are already clear */
+        uint32_t clear = data & *reg32;
+        while (clear) {
+            int irq = CTZ(clear);
+            clear &= ~(1U << irq);
+            irq += (offset - 0x180) * 8;
+            vgic_sgi_disable_irq(gic_rdist_sgi, irq);
+        }
+        /* clear the corresponding bits in the enable set register */
+        *reg32 &= ~data;
+        int i = (offset - 0x180) / sizeof(uint32_t);
+        gic_rdist_sgi->icenable[i] &= ~data;
+        assert(gic_rdist_sgi->isenable[i] == gic_rdist_sgi->icenable[i]);
+        return ignore_fault(fault);
+    }
+    case ACTION_UNKNOWN:
+    default:
+        printf("SGI %lu: Unknown write on offset 0x%x --> 0x%lx\n", fault->vcpu_idx, offset, data);
     }
     abandon_fault(fault);
     return -1;
 }
 
-static int handle_vgic_sgi_fault(struct device *d, vm_t *vm, fault_t *fault)
+
+static int handle_vgic_dist_write(struct gic_dist_map *gic_dist, vgic_t *vgic, vm_t *vm,
+                                  fault_t *fault, uintptr_t reg, int offset)
 {
-    struct gic_rdist_sgi_ppi_map *gic_rdist_sgi = vgic_priv_get_rdist_sgi(d, fault->vcpu_idx);
-    uint32_t mask = fault_get_data_mask(fault);
+    uintptr_t data = fault_get_data(fault) & fault_get_data_mask(fault);
+    uint32_t *reg32 = (uint32_t *) ALIGN_DOWN(reg, sizeof(uint32_t));
+
+    switch (gic_dist_get_action(offset)) {
+    case ACTION_READONLY:
+    case ACTION_PASSTHROUGH:
+        //TODO stop doing this for read only
+        *reg32 = data;
+        break;
+    case ACTION_ENABLE:
+        // TODO handle smaller writes
+        if (data & GIC_ENABLED) {
+            vgic_dist_enable(gic_dist);
+        } else {
+            vgic_dist_disable(gic_dist);
+        }
+        *reg32 = data & 0b10011; // TODO why
+        break;
+    case ACTION_ENABLE_SET: {
+        /* Mask bits that are already set */
+        uint32_t enable = data & ~(*reg32);
+        while (enable) {
+            int irq = CTZ(enable);
+            enable &= ~(1U << irq);
+            irq += (offset - 0x100) * 8;
+            vgic_dist_enable_irq(vgic, gic_dist, irq);
+            enable_irq(irq);
+        }
+        int i = (offset - 0x100) / sizeof(uint32_t);
+        /* set the corresponding bits on the enable clear register */
+        gic_dist->enable_set[i] |= data;
+        *reg32 |= data;
+        assert(gic_dist->enable_clr[i] == gic_dist->enable_set[i]);
+        break;
+    }
+    case ACTION_ENABLE_CLR: {
+        /* Mask bits that are already clear */
+        uint32_t clear = data & (*reg32);
+        while (clear) {
+            int irq = CTZ(clear);
+            clear &= ~(1U << irq);
+            irq += (offset - 0x180) * 8;
+            vgic_dist_disable_irq(gic_dist, irq);
+            disable_irq(irq);
+        }
+        *reg32 &= ~data;
+        int i = (offset - 0x180) / sizeof(uint32_t);
+        gic_dist->enable_clr[i] &= ~data;
+        assert(gic_dist->enable_clr[i] == gic_dist->enable_set[i]);
+        break;
+    }
+    case ACTION_PENDING_SET: {
+        /* Mask bits that are already set */
+        uint32_t ps = data & ~(*reg32);
+        while (ps) {
+             int irq = CTZ(ps);
+             ps &= ~(1U << irq);
+             irq += (offset - 0x200) * 8;
+             vgic_dist_set_pending_irq(vgic, vm_get_vcpu(vm, fault->vcpu_idx), irq,
+                     fault->vcpu_idx, false);
+        }
+        break;
+    }
+    case ACTION_PENDING_CLR: {
+        /* Mask bits that are already clear */
+        uint32_t pc = data & *reg32;
+        while (pc) {
+             int irq = CTZ(pc);
+             pc &= ~(1U << irq);
+             irq += (offset - 0x280) * 8;
+             vgic_dist_clr_pending_irq(gic_dist, irq);
+        }
+        break;
+    }
+    case ACTION_SGI:
+        ZF_LOGE("vgic SGI not implemented!\n");
+        return abandon_fault(fault);
+    case ACTION_ROUTE: {
+          uint64_t route = data;
+          int irq = (offset - 0x6000) / sizeof(uint64_t);
+          // TODO pass in a routing function for when this value changes
+          if (route  != 0) {
+             printf("Attempted to route irq %d to %p\n", irq, (void *) route);
+          }
+          break;
+     }
+    case ACTION_SET_TRIGGER: {
+        assert(fault_get_width(fault) == WIDTH_WORD);
+        /* Mask bits that are already set */
+        uint32_t config = data & ~(*reg32);
+        while (config) {
+             /* get which icfgr register is being modified */
+             int n = (offset - 0xC00) / sizeof(uint32_t);
+             /* each 32 bit icfgr<n> register covers 16 irqs */
+             n = n * 16;
+             for (int i = 0; i < 16; i++) {
+                 int irq = i + n;
+                 set_trigger(irq, config & 0x3);
+                 config = config >> 2;
+             }
+         }
+         // TODO pass a function here to change the level
+         // for our static system, hopefully it will just check if its correct or not
+         emulate_write(fault, reg, offset);
+         break;
+    }
+    default:
+        printf("Unknown vgic dist fault\n");
+        return abandon_fault(fault);
+    }
+    return ignore_fault(fault);
+}
+
+static int handle_vgic_fault(struct device *d, vm_t *vm, fault_t *fault)
+{
     int offset = fault_get_address(fault) - d->pstart;
-    uint32_t *reg = (uint32_t *)((uintptr_t)gic_rdist_sgi + (offset - (offset % 4)));
-    enum gic_dist_action act = gic_sgi_get_action(offset);
+    if (offset < 0 || offset >= d->size) {
+        ZF_LOGF("%s offset %d out of range\n", d->name, offset);
+        return -1;
+    }
 
-    /* Out of range */
-    if (offset < 0 || offset >= sizeof(struct gic_rdist_sgi_ppi_map)) {
-        DDIST("sgi offset out of range %d %zu\n", offset, (size_t) sizeof(struct gic_rdist_sgi_ppi_map));
-        return ignore_fault(fault);
+    vgic_t *vgic = vgic_device_get_vgic(d);
+    /* address in the device that the guest was attempting to access */
+    void *base;
+    switch (d->devid) {
+    case DEV_VGIC_DIST:
+        base = priv_get_dist(vgic->registers);
+        break;
+    case DEV_VGIC_V3_REDIST:
+        base = vgic_priv_get_rdist(d, fault->vcpu_idx);
+        break;
+    case DEV_VGIC_V3_REDIST_SGI:
+        base = vgic_priv_get_rdist_sgi(d, fault->vcpu_idx);
+        break;
+    }
 
-        /* Read fault */
-    } else if (fault_is_read(fault)) {
-        fault_set_data(fault, *reg);
-        return advance_fault(fault);
+    uintptr_t reg = offset + (uintptr_t) base;
+    if (unlikely(!is_valid_fault(fault, reg))) {
+        ZF_LOGE("Invalid or unaligned fault addr %p\n", (void *) reg);
+        return abandon_fault(fault);
+    }
+
+    if (fault_is_read(fault)) {
+        if (fault_get_width(fault) == WIDTH_WORD) {
+           ZF_LOGV("%s: read 0x%x: 0x%x\n", d->name, offset, *((uint32_t *) reg));
+        } else if (fault_get_width(fault) == WIDTH_DOUBLEWORD) {
+           ZF_LOGV("%s: read 0x%x: 0x%lx\n", d->name, offset, *((uint64_t *) reg));
+        } else {
+            ZF_LOGE("%s: Invalid fault width\n", d->name);
+            assert(0);
+        }
+        return handle_read(fault, reg);
     } else {
-        uint32_t data;
-        switch (act) {
-        case ACTION_READONLY:
-            *reg = fault_emulate(fault, *reg);
-            data = fault_get_data(fault);
-            DDIST("SGI %lu: ignoring write on offset 0x%x --> 0x%x\n", fault->vcpu_idx, offset, data);
-            return ignore_fault(fault);
-        case ACTION_ENABLE_SET:
-            data = fault_get_data(fault);
-
-            /* Mask the data to write */
-            data &= mask;
-            /* Mask bits that are already set */
-            data &= ~(*reg);
-
-            while (data) {
-                int irq;
-                irq = CTZ(data);
-                data &= ~(1U << irq);
-                irq += (offset - 0x100) * 8;
-                vgic_sgi_enable_irq(d, vm, irq, fault->vcpu_idx);
-            }
-            return ignore_fault(fault);
-
-        case ACTION_ENABLE_CLR:
-            data = fault_get_data(fault);
-            /* Mask the data to write */
-            data &= mask;
-            /* Mask bits that are already clear */
-            data &= *reg;
-            while (data) {
-                int irq;
-                irq = CTZ(data);
-                data &= ~(1U << irq);
-                irq += (offset - 0x180) * 8;
-                vgic_sgi_disable_irq(d, vm, irq, fault->vcpu_idx);
-            }
-            return ignore_fault(fault);
-
-        case ACTION_UNKNOWN:
-        default:
-            *reg = fault_emulate(fault, *reg);
-            data = fault_get_data(fault);
-            DDIST("SGI %lu: Unknown write on offset 0x%x --> 0x%x\n", fault->vcpu_idx, offset, data);
-            return ignore_fault(fault);
+        uint64_t data = fault_get_data(fault);
+        if (fault_get_width(fault) == WIDTH_WORD) {
+           ZF_LOGV("%s: write 0x%x: 0x%x\n", d->name, offset, (uint32_t) data);
+        } else if (fault_get_width(fault) == WIDTH_DOUBLEWORD) {
+           ZF_LOGV("%s: write 0x%x: 0x%lx\n", d->name, offset, data);
+        } else {
+            ZF_LOGE("%s: Invalid fault width\n", d->name);
         }
     }
-    abandon_fault(fault);
-    return -1;
+
+    switch (d->devid) {
+    case DEV_VGIC_DIST:
+        return handle_vgic_dist_write(base, vgic, vm, fault, reg, offset);
+    case DEV_VGIC_V3_REDIST:
+        return handle_vgic_rdist_write(base, vgic, vm, fault, reg, offset);
+    case DEV_VGIC_V3_REDIST_SGI:
+        return handle_vgic_rdist_sgi_write(base, vgic, vm, fault, reg, offset);
+    default:
+        ZF_LOGE("unknown device id %d\n", d->devid);
+        break;
+    }
+
+    return ignore_fault(fault);
 }
 
 static void vgic_dist_reset(struct device *d)
@@ -301,41 +510,48 @@ static void vgic_dist_reset(struct device *d)
     struct gic_dist_map *gic_dist = vgic_priv_get_dist(d);
     memset(gic_dist, 0, sizeof(*gic_dist));
 
-    gic_dist->typer            = 0x7B04B0; /* RO */
-    gic_dist->iidr             = 0x1043B ; /* RO */
+    gic_dist->typer            = 0x7B0418; /* RO */ // TODO yanyan had 0x7b0418
+    //gic_dist->typer            = 0x7B04B0; /* RO */ // TODO yanyan had 0x7b0418
+    gic_dist->iidr             = 0x0043B ; /* RO */ // TODO yanyan had 0x43b
+    //gic_dist->iidr             = 0x1043B ; /* RO */ // TODO yanyan had 0x43b
+    //todo yanyan had gic_dist->pidr = 0x30?
 
     gic_dist->enable_set[0]    = 0x0000ffff; /* 16bit RO */
     gic_dist->enable_clr[0]    = 0x0000ffff; /* 16bit RO */
 
     gic_dist->config[0]        = 0xaaaaaaaa; /* RO */
 
-    gic_dist->pidrn[0]         = 0x44;     /* RO */
-    gic_dist->pidrn[4]         = 0x92;     /* RO */
-    gic_dist->pidrn[5]         = 0xB4;     /* RO */
-    gic_dist->pidrn[6]         = 0x3B;     /* RO */
+  //  gic_dist->pidrn[0]         = 0x44;     /* RO */
+    gic_dist->pidrn[6]         = 0x30;
 
-    gic_dist->cidrn[0]         = 0x0D;     /* RO */
-    gic_dist->cidrn[1]         = 0xF0;     /* RO */
-    gic_dist->cidrn[2]         = 0x05;     /* RO */
-    gic_dist->cidrn[3]         = 0xB1;     /* RO */
+    //   gic_dist->pidrn[4]         = 0x92;     /* RO */
+ //   gic_dist->pidrn[5]         = 0xB4;     /* RO */
+ //   gic_dist->pidrn[6]         = 0x3B;     /* RO */
+
+//    gic_dist->cidrn[0]         = 0x0D;     /* RO */
+//    gic_dist->cidrn[1]         = 0xF0;     /* RO */
+//    gic_dist->cidrn[2]         = 0x05;     /* RO */
+  //  gic_dist->cidrn[3]         = 0xB1;     /* RO */
 }
 
 static void vgic_rdist_reset(struct gic_rdist_map *gic_rdist)
 {
     memset(gic_rdist, 0, sizeof(*gic_rdist));
 
-    gic_rdist->typer           = 0x1;      /* RO */
-    gic_rdist->iidr            = 0x1143B;  /* RO */
+    //gic_rdist->typer           = 0x1;      /* RO */
+    //gic_rdist->iidr            = 0x1143B;  /* RO */ //TODO yanyan had 0x43B
+    gic_rdist->iidr             = 0x0043B ; /* RO */ // TODO yanyan had 0x43b
 
-    gic_rdist->pidr0           = 0x93;     /* RO */
-    gic_rdist->pidr1           = 0xB4;     /* RO */
-    gic_rdist->pidr2           = 0x3B;     /* RO */
-    gic_rdist->pidr4           = 0x44;     /* RO */
+  //  gic_rdist->pidr0           = 0x93;     /* RO */
+   // gic_rdist->pidr1           = 0xB4;     /* RO */
+    //gic_rdist->pidr2           = 0x3B;     /* RO */ //TODO yanyan had 0x30
+    gic_rdist->pidr2           = 0x30;     /* RO */ //TODO yanyan had 0x30
+ //   gic_rdist->pidr4           = 0x44;     /* RO */
 
-    gic_rdist->cidr0           = 0x0D;     /* RO */
-    gic_rdist->cidr1           = 0xF0;     /* RO */
-    gic_rdist->cidr2           = 0x05;     /* RO */
-    gic_rdist->cidr3           = 0xB1;     /* RO */
+   // gic_rdist->cidr0           = 0x0D;     /* RO */
+   // gic_rdist->cidr1           = 0xF0;     /* RO */
+   // gic_rdist->cidr2           = 0x05;     /* RO */
+   // gic_rdist->cidr3           = 0xB1;     /* RO */
 }
 
 static void vgic_rdist_sgi_reset(struct gic_rdist_sgi_ppi_map *gic_sgi)
@@ -344,23 +560,36 @@ static void vgic_rdist_sgi_reset(struct gic_rdist_sgi_ppi_map *gic_sgi)
     gic_sgi->isactive[0]       = 0xaaaaaaaa;
 }
 
+            extern int cur_el[CONFIG_MAX_NUM_NODES];
 /* public functions */
-int vgic_vcpu_inject_irq(vgic_t *vgic, seL4_CPtr vcpu, struct virq_handle *irq, seL4_Word vcpu_idx)
+int vgic_vcpu_inject_irq(vgic_t *vgic, seL4_CPtr vcpu, struct virq_handle *irq, seL4_Word vcpu_idx, bool masked)
 {
-    assert(!vgic_lr_has_virq(vgic, vcpu_idx, irq));
-    int i = vgic_find_free_irq(vgic, vcpu_idx);
-    assert(i < 4);
-    seL4_Error err = seL4_ARM_VCPU_InjectIRQ(vcpu, irq->virq, 0, 1, i);
-    assert((i < 4) || err);
-    if (!err) {
-        /* Shadow */
-        vgic_shadow_irq(vgic, i, irq, vcpu_idx);
-        return err;
-    } else {
-        int error = vgic_add_overflow(vgic, irq, vcpu_idx);
-        ZF_LOGF_IF(error, "too many overflow irqs");
+    if (vgic_lr_has_virq(vgic, vcpu_idx, irq) != -1) {
         return 0;
     }
+
+    if (irq->virq > 16) {
+    enable_irq(irq->virq);
+    }
+    if (!masked) {
+        int i = vgic_find_free_irq(vgic, vcpu_idx);
+        if (i >= 0 && i < 4) {
+            assert(cur_el[vcpu_idx] == 1);
+            assert(irq->virq != 379);
+            //printf("Injected irq %d\n", irq->virq);
+            seL4_Error err = seL4_ARM_VCPU_InjectIRQ(vcpu, irq->virq, 0, 1, i);
+            assert(err == 0);
+            vgic_shadow_irq(vgic, i, irq, vcpu_idx);
+            return 0;
+        } else {
+            printf("VDIST: overflow due to out of lrs, %d\n", i);
+        }
+    } else {
+        //printf("VDIST: overflow masked\n");
+    }
+    /* inject overflow */
+
+    return vgic_add_overflow(vgic, irq, vcpu_idx);
 }
 
 int handle_vgic_maintenance(vm_t *vm, int idx, seL4_Word vcpu_idx)
@@ -369,7 +598,9 @@ int handle_vgic_maintenance(vm_t *vm, int idx, seL4_Word vcpu_idx)
     vm->lock();
 #endif //CONCONFIG_LIB_SEL4_ARM_VMM_VCHAN_SUPPORT
 
+    assert(cur_el[vcpu_idx] == 1);
     /* STATE d) */
+    assert(vcpu_idx < CONFIG_MAX_NUM_NODES);
     struct device *d = vm_find_device_by_id(vm, DEV_VGIC_DIST);
     struct gic_dist_map *gic_dist = vgic_priv_get_dist(d);
 
@@ -391,6 +622,10 @@ int handle_vgic_maintenance(vm_t *vm, int idx, seL4_Word vcpu_idx)
            vgic->irq[vcpu_idx][i] = NULL;
         }
     }
+
+
+    extern int cur_el[CONFIG_MAX_NUM_NODES];
+    if (cur_el[vcpu_idx] == 2) return 0;
     vgic_handle_overflow(vgic, vm_get_vcpu(vm, vcpu_idx), vcpu_idx);
 #ifdef CONFIG_LIB_SEL4_ARM_VMM_VCHAN_SUPPORT
     vm->unlock();
@@ -399,12 +634,12 @@ int handle_vgic_maintenance(vm_t *vm, int idx, seL4_Word vcpu_idx)
     return 0;
 }
 
-int vm_inject_IRQ(virq_handle_t virq, seL4_Word vcpu_idx)
+int vm_inject_IRQ(virq_handle_t virq, seL4_Word vcpu_idx, bool masked)
 {
     assert(virq);
     vm_t *vm = virq->vm;
 
-    DIRQ("VM received IRQ %d\n", virq->virq);
+    DIRQ("VM received IRQ %d %d\n", virq->virq, masked);
 
     /* Grab a handle to the VGIC */
     struct device *vgic_device = vm_find_device_by_id(vm, DEV_VGIC_DIST);
@@ -414,9 +649,9 @@ int vm_inject_IRQ(virq_handle_t virq, seL4_Word vcpu_idx)
 
     vgic_t *vgic = vgic_device_get_vgic(vgic_device);
     if (virq->virq >= GIC_SPI_IRQ_MIN) {
-	    vgic_dist_set_pending_irq(vgic, vm_get_vcpu(vm, vcpu_idx), virq->virq, vcpu_idx);
+	    vgic_dist_set_pending_irq(vgic, vm_get_vcpu(vm, vcpu_idx), virq->virq, vcpu_idx, masked);
     } else {
-        vgic_sgi_set_pending_irq(vgic_device, vm, virq->virq, vcpu_idx);
+        vgic_sgi_set_pending_irq(vgic_device, vm, virq->virq, vcpu_idx, masked);
     }
 
     fault_t *fault = vm->vcpus[vcpu_idx].fault;
@@ -502,7 +737,7 @@ int vm_install_vgic(vm_t *vm)
         if (i == CONFIG_MAX_NUM_NODES - 1) {
             registers->rdist[i]->typer |= BIT(4);
         }
-        registers->rdist[i]->typer |= BIT(24) | (i << 32) | (i << 8);
+        registers->rdist[i]->typer |= BIT(24) | (i << 32 + 8);
 
         vgic_rdist_sgi_reset(registers->sgi[i]);
         if (vm_add_device(vm, &sgi)) {
@@ -525,7 +760,7 @@ const struct device dev_vgic_dist = {
     .name = "vgic.distributor",
     .pstart = GIC_DIST_PADDR,
     .size = 0x10000,
-    .handle_page_fault = &handle_vgic_dist_fault,
+    .handle_page_fault = &handle_vgic_fault,
     .priv = NULL,
 };
 
@@ -534,7 +769,7 @@ const struct device dev_vgic_redist = {
     .name = "vgic.redistributor",
     .pstart = GIC_REDIST_PADDR,
     .size = 0x10000,
-    .handle_page_fault = &handle_vgic_rdist_fault,
+    .handle_page_fault = &handle_vgic_fault,
     .priv = NULL,
 };
 
@@ -543,6 +778,6 @@ const struct device dev_vgic_redist_sgi = {
     .name = "vgic.redistributor_sgi",
     .pstart = GIC_REDIST_PADDR + GIC_SGI_OFFSET,
     .size = 0x10000,
-    .handle_page_fault = &handle_vgic_sgi_fault,
+    .handle_page_fault = &handle_vgic_fault,
     .priv = NULL,
 };

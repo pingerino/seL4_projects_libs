@@ -54,9 +54,11 @@ void *map_ram(vspace_t *vspace, vspace_t *vmm_vspace, vka_t *vka, uintptr_t vadd
  * Map RAM with full access rights into a VM
  * @param[in] vm      The VM to map the device to
  * @param[in] va      The VA (or IPA) to map to, or 0 to let the system choose
+ * @param[in] size_bits The mapping size to use
  * @return            The virtual address of the mapping
+ *
  */
-void *map_vm_ram(vm_t *vm, uintptr_t va);
+void *map_vm_ram(vm_t *vm, uintptr_t va, size_t size_bits);
 
 /**
  * Map a shared page between VM and VMM. The page will not be mapped cacheable
@@ -88,7 +90,7 @@ void *map_emulated_device(vm_t *vm, const struct device *d);
  * @param[in] d    A description of the device to check
  * @return         non-zero if the address belongs to the device
  */
-static inline int dev_paddr_in_range(uint32_t addr, const struct device *d)
+static inline int dev_paddr_in_range(uintptr_t addr, const struct device *d)
 {
     return ((addr >= d->pstart) && addr < (d->pstart + d->size));
 }

@@ -36,7 +36,7 @@
 #include <sel4arm-vmm/smc.h>
 #include <sel4vmmcore/util/io.h>
 
-//#define DEBUG_VM
+#define DEBUG_VM
 //#define DEBUG_RAM_FAULTS
 //#define DEBUG_DEV_FAULTS
 //#define DEBUG_STRACE
@@ -122,6 +122,8 @@ extern char _cpio_archive[];
 static virq_handle_t vtimer_irq_handle[CONFIG_MAX_NUM_NODES] = {0};
 static virq_handle_t vcpu_sgi_ppi[CONFIG_MAX_NUM_NODES][32]; // TODO unmagic
 
+extern int vmlinux_handle_monitored_address(struct device *d, vm_t *vm, fault_t *fault);
+
 static int handle_page_fault(vm_t *vm, fault_t *fault)
 {
 
@@ -143,6 +145,9 @@ static int handle_page_fault(vm_t *vm, fault_t *fault)
     } else {
 #ifdef CONFIG_ONDEMAND_DEVICE_INSTALL
         uintptr_t addr = fault_get_address(fault) & ~0xfff;
+        if (vmlinux_handle_monitored_address(NULL, vm, fault) == 0) {
+            return 0;
+        }
         switch (addr) {
         case 0:
             print_fault(fault);
@@ -150,15 +155,15 @@ static int handle_page_fault(vm_t *vm, fault_t *fault)
         default: {
             void *mapped = map_vm_device(vm, addr, addr, seL4_AllRights);
             if (mapped) {
-                DVM("WARNING: Blindly mapped device @ 0x%x for PC 0x%x\n",
-                    fault_get_address(fault), fault_get_ctx(fault)->pc);
+              //  DVM("WARNING: Blindly mapped device @ %p for PC %p\n",
+              //      (void *) fault_get_address(fault), (void *) fault_get_ctx(fault)->pc);
                 restart_fault(fault);
                 return 0;
             }
-            mapped = map_vm_ram(vm, addr);
+            mapped = map_vm_ram(vm, addr, seL4_PageBits);
             if (mapped) {
-                DVM("WARNING: Mapped RAM for device @ 0x%x for PC 0%x\n",
-                    fault_get_address(fault), fault_get_ctx(fault)->pc);
+                DVM("WARNING: Mapped RAM for device @ %p for PC %p\n",
+                    (void *) fault_get_address(fault), (void *) fault_get_ctx(fault)->pc);
                 restart_fault(fault);
                 return 0;
             }
@@ -194,6 +199,7 @@ static int vm_vcpu_for_target_cpu(vm_t *vm, uintptr_t target_cpu)
     return -1;
 }
 
+// TODO might need to expose this for LATE_SMP? or to run qhee stuff on it?
 static int vm_start_vcpu(vm_t *vm, uintptr_t target_cpu,
                        uintptr_t entry_point_address, uintptr_t context_id)
 {
@@ -230,7 +236,7 @@ static int handle_psci(vm_t *vm, vcpu_t *vcpu, seL4_Word fn_number, bool convent
     seL4_UserContext *regs = fault_get_ctx(vcpu->fault);
     switch (fn_number) {
     case PSCI_VERSION:
-        regs->x0 = (BIT(15) | BIT(1));
+        regs->x0 = 0x00010000; // version 1 //(BIT(15) | BIT(1));
         return ignore_fault(vcpu->fault);
     case PSCI_CPU_ON: {
         uintptr_t target_cpu = smc_get_arg(regs, 1);
@@ -254,13 +260,22 @@ static int handle_psci(vm_t *vm, vcpu_t *vcpu, seL4_Word fn_number, bool convent
     case PSCI_MIGRATE_INFO_TYPE:
         regs->x0 = 2; // trusted OS does not require migration
         return ignore_fault(vcpu->fault);
+    case PSCI_FEATURES:
+        //TODO yanyan implemented this, not sure if required
+        regs->x0 = PSCI_NOT_SUPPORTED;
+        return ignore_fault(vcpu->fault);
+    case PSCI_SYSTEM_RESET:
+        regs->x0 = PSCI_SUCCESS;
+        return ignore_fault(vcpu->fault);
     default:
         ZF_LOGE("Unhandled PSCI function id %lu\n", fn_number);
         return -1;
     }
 }
 
-static int handle_smc(vm_t *vm, vcpu_t *vcpu)
+extern int vm_handle_smc(vm_t *vm, fault_t *fault, uint32_t esr);
+
+static int handle_smc(vm_t *vm, vcpu_t *vcpu, uint32_t hsr)
 {
     fault_t *fault = vcpu->fault;
     seL4_UserContext *regs = fault_get_ctx(fault);
@@ -270,46 +285,62 @@ static int handle_smc(vm_t *vm, vcpu_t *vcpu)
 
     switch (service) {
     case SMC_CALL_ARM_ARCH:
-        ZF_LOGE("Unhandled SMC: arm architecture call %lu\n", fn_number);
-        regs->x0 = -1;
-        return ignore_fault(vcpu->fault);
+        //ZF_LOGE("Unhandled SMC: arm architecture call %lu\n", fn_number);
+        //regs->x0 = -1;
+        vm_handle_smc(vm, fault, hsr);
+        return 0;
+        //return ignore_fault(vcpu->fault);
     case SMC_CALL_CPU_SERVICE:
-        ZF_LOGE("Unhandled SMC: CPU service call %lu\n", fn_number);
+        ZF_LOGF("Unhandled SMC: CPU service call %lu\n", fn_number);
         break;
     case SMC_CALL_SIP_SERVICE:
-        regs->x0 = -1;
-        ZF_LOGW("Ignoring SiP service call %lu\n", fn_number);
-        return ignore_fault(vcpu->fault);
+        vm_handle_smc(vm, fault, hsr);
+        ZF_LOGI("Got SiP service call %lu\n", fn_number);
+        //restart_fault(vcpu->fault);
+        return 0;
     case SMC_CALL_OEM_SERVICE:
-        ZF_LOGE("Unhandled SMC: OEM service call %lu\n", fn_number);
+        ZF_LOGF("Unhandled SMC: OEM service call %lu\n", fn_number);
         break;
     case SMC_CALL_STD_SERVICE:
         if (fn_number < PSCI_MAX) {
             return handle_psci(vm, vcpu, fn_number, smc_call_is_32(id));
         }
-        ZF_LOGE("Unhandled SMC: standard service call %lu\n", fn_number);
+        ZF_LOGF("Unhandled SMC: standard service call %lu\n", fn_number);
         break;
     case SMC_CALL_STD_HYP_SERVICE:
-        ZF_LOGE("Unhandled SMC: standard hyp service call %lu\n", fn_number);
+        ZF_LOGF("Unhandled SMC: standard hyp service call %lu\n", fn_number);
         break;
     case SMC_CALL_VENDOR_HYP_SERVICE:
-        ZF_LOGE("Unhandled SMC: vendor hyp service call %lu\n", fn_number);
+        ZF_LOGF("Unhandled SMC: vendor hyp service call %lu\n", fn_number);
         break;
     case SMC_CALL_TRUSTED_APP:
-        ZF_LOGE("Unhandled SMC: trusted app call %lu\n", fn_number);
-        break;
+        vm_handle_smc(vm, fault, hsr);
+        return 0;
+        //ZF_LOGF("Unhandled SMC: trusted app call %lu\n", fn_number);
+        //break;
     case SMC_CALL_TRUSTED_OS:
-        ZF_LOGE("Unhandled SMC: trusted os call %lu\n", fn_number);
+        vm_handle_smc(vm, fault, hsr);
+        return 0;
+        //ZF_LOGF("Unhandled SMC: trusted os call %lu\n", fn_number);
         break;
     default:
-        ZF_LOGE("Unhandle SMC: unknown value service: %lu fn_number: %lu\n",
+        ZF_LOGF("Unhandle SMC: unknown value service: %lu fn_number: %lu\n",
                 (unsigned long) service, fn_number);
         break;
     }
 
+    assert(0);
     return -1;
 }
 
+extern int handle_qhee_hvc(vm_t *vm, fault_t *fault, uint32_t hsr);
+
+static int handle_hvc(vm_t *vm, fault_t *fault, uintptr_t hsr)
+{
+    handle_qhee_hvc(vm, fault, hsr);
+    restart_fault(fault);
+    return 0;
+}
 
 static void sgi_ack(UNUSED void *x) {
     // do nothing
@@ -324,6 +355,9 @@ static int handle_msr_mrs_other(vm_t *vm, vcpu_t *vcpu, fault_t *fault, uintptr_
 {
     seL4_Word rt = *decode_rt(HSR_EC_RT(hsr), fault_get_ctx(fault));
     bool is_read = HSR_EC_DIR(hsr);
+
+    extern int virq_blocked[CONFIG_MAX_NUM_NODES];
+    bool masked = virq_blocked[fault->vcpu_idx];
 
     switch (hsr & MSR_MRS_MASK)  {
     case ICC_SGI1R_EL1: {
@@ -343,7 +377,7 @@ static int handle_msr_mrs_other(vm_t *vm, vcpu_t *vcpu, fault_t *fault, uintptr_
             // Interrupts routed to all PEs in the system, excluding "self".
             if (irm) {
                 if (vm->vcpus[i].target_cpu != vcpu->target_cpu) {
-                    vm_inject_IRQ(vcpu_sgi_ppi[i][intid], i);
+                    vm_inject_IRQ(vcpu_sgi_ppi[i][intid], i, masked);
 
                 }
             // Interrupts routed to the PEs specified
@@ -352,7 +386,10 @@ static int handle_msr_mrs_other(vm_t *vm, vcpu_t *vcpu, fault_t *fault, uintptr_
                        aff1 == MPIDR_AFF1(vm->vcpus[i].target_cpu) &&
                        aff2 == MPIDR_AFF2(vm->vcpus[i].target_cpu) &&
                        aff3 == MPIDR_AFF3(vm->vcpus[i].target_cpu)) {
-                vm_inject_IRQ(vcpu_sgi_ppi[i][intid], i);
+                //printf("%d: Got SGI %x %x %x %x\n", __LINE__, target_list, aff1, aff2, aff3);
+                vm_inject_IRQ(vcpu_sgi_ppi[i][intid], i, masked);
+            } else {
+                printf("Unhandled SGI %x %x %x %x\n", target_list, aff1, aff2, aff3);
             }
         }
         return ignore_fault(vcpu->fault);
@@ -506,7 +543,15 @@ int vm_create(const char *name, int priority,
                           simple_get_tcb(simple), i);
         ZF_LOGF_IF(err, "Failed to create vcpu %d\n", i);
     }
-    return err;
+
+    if (err) {
+        ZF_LOGE("Failed to write vcpu regs\n");
+        return -1;
+    }
+
+    return seL4_ARM_VCPU_WriteRegs(vm->vcpus[0].vcpu.cptr, seL4_VCPUReg_VMPIDR_EL2,
+            BIT(24) | BIT(31));
+
 }
 
 
@@ -564,7 +609,7 @@ static void sys_ipa_to_pa(vm_t *vm, seL4_UserContext *regs)
     seL4_CPtr cap = vspace_get_cap(vm_get_vspace(vm), (void *)ipa);
     if (cap == seL4_CapNull) {
         void *mapped_address;
-        mapped_address = map_vm_ram(vm, ipa);
+        mapped_address = map_vm_ram(vm, ipa, seL4_PageBits);
         if (mapped_address == NULL) {
             printf("Could not map address for IPA translation\n");
             return;
@@ -648,6 +693,8 @@ static int virtual_timer_irq(vm_t *vm, seL4_Word vcpu_idx)
 }
 #endif
 
+static int vmm_affinity = 0;
+
 int vm_event(vm_t *vm, seL4_MessageInfo_t tag, seL4_Word badge)
 {
     seL4_Word label = seL4_MessageInfo_get_label(tag);
@@ -657,6 +704,14 @@ int vm_event(vm_t *vm, seL4_MessageInfo_t tag, seL4_Word badge)
     vcpu_t *vcpu = &vm->vcpus[vcpu_idx];
     fault_t *fault = vcpu->fault;
 
+#if CONFIG_MAX_NUM_NODES > 1
+    // TODO yanyan had this to prevent races with linux
+    if (vmm_affinity != vcpu_idx) {
+        vmm_affinity = vcpu_idx;
+        err = seL4_TCB_SetAffinity(seL4_CapInitThreadTCB, vcpu_idx);
+        ZF_LOGF_IF(err != 0, "Failed to move to vcpu core");
+    }
+#endif
     switch (label) {
     case seL4_Fault_VMFault: {
         err = new_fault(fault);
@@ -694,15 +749,33 @@ int vm_event(vm_t *vm, seL4_MessageInfo_t tag, seL4_Word badge)
     }
     break;
     case seL4_Fault_VGICMaintenance: {
-        assert(length == seL4_VGICMaintenance_Length);
-        int idx = seL4_GetMR(seL4_VGICMaintenance_IDX);
-        /* Currently not handling spurious IRQs */
-        assert(idx >= 0);
-        err = handle_vgic_maintenance(vm, idx, vcpu_idx);
-        assert(!err);
-        if (!err) {
+        int idx = -1;
+        if (length == 0) {
+            /* just maintenance, no irqs */
+            idx = 0;
+        } else if (length == seL4_VGICMaintenance_Length) {
+            idx = (seL4_Word) seL4_GetMR(seL4_VGICMaintenance_IDX);
+        } else {
+            ZF_LOGE("invalid maintenance message, not replying\n");
+                printf("%s:%d\n", __FILE__, __LINE__);
+            return -1;
+        }
+
+        if (idx != -1) {
+            err = handle_vgic_maintenance(vm, idx, vcpu_idx);
+        } else {
+            err = 0;
+        }
+        if (!err && length != 0) {
             seL4_MessageInfo_t reply = seL4_MessageInfo_new(0, 0, 0, 0);
             seL4_Reply(reply);
+        }
+        if (err) {
+            ZF_LOGE("handle vgic maintenance failed!");
+                printf("%s:%d\n", __FILE__, __LINE__);
+            return -1;
+        } else {
+            return 0;
         }
     }
     break;
@@ -720,11 +793,15 @@ int vm_event(vm_t *vm, seL4_MessageInfo_t tag, seL4_Word badge)
         case HSR_EC_SMC32:
         case HSR_EC_SMC64: {
             new_smc_fault(fault);
-            return handle_smc(vm, vcpu);
+            return handle_smc(vm, vcpu, hsr);
         }
         case HSR_EC_MSR_MRS_OTHER: {
             new_smc_fault(fault);
             return handle_msr_mrs_other(vm, vcpu, fault, hsr);
+        }
+        case HSR_EC_HVC64: {
+            new_smc_fault(fault);
+            return handle_hvc(vm, fault, hsr);
         }
         default:
             printf("Unhandled VCPU fault from [%s]: HSR 0x%08x\n", vm->name, hsr);
@@ -825,6 +902,7 @@ int vm_copyout_atags(vm_t *vm, struct atag_list *atags, uint32_t addr)
 int vm_add_device(vm_t *vm, const struct device *d)
 {
     assert(d != NULL);
+    assert(vm->ndevices < MAX_DEVICES_PER_VM);
     if (vm->ndevices < MAX_DEVICES_PER_VM) {
         vm->devices[vm->ndevices++] = *d;
         return 0;

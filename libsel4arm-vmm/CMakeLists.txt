@@ -50,7 +50,8 @@ list(APPEND
            src/arch/arm/devices/vram.c
 )
 
-if(KernelPlatformImx8mq-evk)
+if(KernelPlatformImx8mq-evk OR
+   KernelPlatformSDM845)
     list(APPEND sources src/arch/arm/devices/vgic_v3.c)
 else()
     # currently every other supported core uses the gicv2.
